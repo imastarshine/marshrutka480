@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Маршрутка 480</title>
+    <style>
+        html, body {
+            margin: 0;
+            height: 100%;
+            background: #111;
+            overflow: hidden;
+            touch-action: manipulation;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        canvas {
+            display: block;
+            width: min(100vw, calc(100vh * 640 / 760));
+            height: auto;
+            box-shadow: 0 0 40px rgba(0, 0, 0, 0.8);
+        }
+
+        /* Кнопки для телефона: показываются только на сенсорных экранах */
+        .controls {
+            display: none;
+            width: min(100vw, 640px);
+            box-sizing: border-box;
+            padding: 10px 12px;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+
+        body.touch .controls {
+            display: flex;
+        }
+
+        body.touch canvas {
+            width: min(100vw, calc((100vh - 130px) * 640 / 760));
+        }
+
+        .group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .controls button {
+            width: 72px;
+            height: 96px;
+            border: 2px solid #f5c81e;
+            border-radius: 16px;
+            background: #26262c;
+            color: #f5c81e;
+            font: bold 30px Arial, sans-serif;
+            touch-action: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .controls button.on {
+            background: #f5c81e;
+            color: #111;
+        }
+
+        .controls .pause {
+            width: 52px;
+            height: 52px;
+            font-size: 20px;
+            border-color: #888;
+            color: #ccc;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="game" width="640" height="760"></canvas>
+    <div class="controls">
+        <div class="group">
+            <button data-key="left">◀</button>
+            <button data-key="right">▶</button>
+        </div>
+        <button class="pause" data-action="pause">II</button>
+        <div class="group">
+            <button data-key="down">▼</button>
+            <button data-key="up">▲</button>
+        </div>
+    </div>
+    <script src="game.js"></script>
+</body>
+</html>
