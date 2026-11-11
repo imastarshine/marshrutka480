@@ -137,6 +137,8 @@ class Reservation:
     y: float
     radius: float
     remaining: float
+    acquired: float = 0.0
+    entered: bool = False
 
 
 class TrafficGraph:
@@ -654,6 +656,9 @@ class SharedTraffic:
         edge = self.graph.edges[npc.edge]
         remaining = npc.offset if npc.reverse else edge.length - npc.offset
         if junction.controlled and remaining < junction.center_stop - .01:
+            reservation = self._reservations.get(npc.id)
+            if reservation and reservation.node == junction.node:
+                reservation.entered = True
             npc.junction_clearance = max(npc.junction_clearance,
                                          remaining + junction.cross_width / 2 + CAR_LENGTH / 2)
             if junction.signal:
@@ -761,6 +766,22 @@ class SharedTraffic:
                                 and (not junction.stop or npc.stop_wait >= 1.0)
                                 and self._exit_clear(request, groups, obstacles))
             requests[npc.id] = request
+        # Only the head of an approach lane may own the intersection. A grant
+        # to a queued follower blocks the leader that it is itself waiting for.
+        heads = {}
+        for request in requests.values():
+            npc = request["npc"]
+            lane, incoming = npc.lane, (npc.edge, npc.reverse)
+            for following in request["path"][1:request["index"] + 1]:
+                lane = self._exit_lane(lane, incoming, following)
+                incoming = following
+            key = (request["junction"].node, request["incoming"], lane)
+            request["approach_key"] = key
+            previous = heads.get(key)
+            if previous is None or (request["distance"], npc.id) < (previous["distance"], previous["npc"].id):
+                heads[key] = request
+        for request in requests.values():
+            request["ready"] = request["ready"] and heads[request["approach_key"]] is request
         for npc_id in list(self._reservations):
             npc = self.npcs.get(npc_id)
             request = requests.get(npc_id)
@@ -771,6 +792,8 @@ class SharedTraffic:
                 expired = expired or math.hypot(x - reservation.x, y - reservation.y) > reservation.radius + CAR_LENGTH
             red_before_entry = (request and reservation.node == request["junction"].node
                                 and self.graph.red(request["junction"], self.seed, world_frame) and npc.connector is None)
+            lost_head = request and heads.get(request["approach_key"]) is not request
+            expired = expired or (not reservation.entered and (self.elapsed - reservation.acquired > 3 or lost_head))
             if expired or red_before_entry:
                 self._reservations.pop(npc_id, None)
         self._reservation_cells.clear()
@@ -811,7 +834,7 @@ class SharedTraffic:
         _, cut_out = self._connector_cuts(request["incoming"], request["outgoing"])
         self._reservations[request["npc"].id] = Reservation(junction.node, x, y,
                                                           self._junction_radius(request),
-                                                          request["distance"] + cut_out + CAR_LENGTH * 2)
+                                                          request["distance"] + cut_out + CAR_LENGTH * 2, self.elapsed)
         self._reservation_cells[(math.floor(x / 800), math.floor(y / 800))].add(request["npc"].id)
 
     def _pose(self, npc):
@@ -936,6 +959,9 @@ class SharedTraffic:
             if not npc.next_edge:
                 npc.speed = 0.0
                 break
+            reservation = self._reservations.get(npc.id)
+            if reservation and reservation.node == self.graph.end_node(npc.edge, npc.reverse):
+                reservation.entered = True
             npc.connector = self._make_connector(npc)
             npc.connector_distance = 0.0
             npc.stop_node, npc.stop_wait, npc.gate_wait = None, 0.0, 0.0

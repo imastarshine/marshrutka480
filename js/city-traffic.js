@@ -410,7 +410,15 @@ class LocalCityTraffic {
         for (const key of this.arrivals.keys()) if (!seen.has(key)) this.arrivals.delete(key);
         for (const [group, requests] of groups) {
             if (this.reservations.has(group)) continue;
-            const eligible = requests.filter(request => request.eligible).sort((a, b) => a.since - b.since || a.car.id.localeCompare(b.car.id));
+            const heads = new Map();
+            for (const request of requests) {
+                const subject = request.intent.subject;
+                const key = `${subject.edge.id}:${subject.reverse}:${subject.lane}`;
+                request.approachKey = key;
+                const previous = heads.get(key);
+                if (!previous || request.intent.distance < previous.intent.distance) heads.set(key, request);
+            }
+            const eligible = requests.filter(request => request.eligible && heads.get(request.approachKey) === request).sort((a, b) => a.since - b.since || a.car.id.localeCompare(b.car.id));
             const oldest = eligible[0];
             if (!oldest) continue;
             const highestPriority = Math.max(...eligible.map(request => request.priority));
