@@ -188,15 +188,9 @@ class RoomManager:
                 conn.send(payload)
 
     def broadcast_city(self, room: CityRoom) -> None:
-        # All drivers share one world tick. Only distant traffic is omitted from
-        # an individual packet; overlapping views contain the same actor IDs.
-        base = room.snapshot()
-        base.pop("traffic")
-        prefix = json.dumps(base, ensure_ascii=False, separators=(",", ":"))[:-1] + ',"traffic":'
-        for conn in list(self.connections.values()):
-            if conn.room_code == room.code:
-                traffic = room.traffic.snapshot_for(room.players.get(conn.user_id))
-                conn.send(prefix + json.dumps(traffic, ensure_ascii=False, separators=(",", ":")) + "}")
+        # Serialize once: every driver receives exactly the same NPC IDs and
+        # poses for this tick, including newly joined and reconnecting drivers.
+        self.broadcast(room.code, room.snapshot())
 
     async def run(self) -> None:
         tick = 0

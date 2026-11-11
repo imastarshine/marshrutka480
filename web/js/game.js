@@ -156,6 +156,8 @@ class GameCore {
         this.strips = [new Strip(ROAD_LEFT - 20, "trees", this), new Strip(ROAD_RIGHT + 30, "lamps", this)];
     }
 
+    get networkTrafficRequired() { return Boolean(window.citySession?.requiresServerTraffic); }
+
     get serverTrafficActive() { return Boolean(window.citySession?.authoritativeTraffic); }
 
     prepareSharedWorld() {

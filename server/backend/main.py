@@ -34,7 +34,7 @@ from .security import RateLimiter, bounded_thread_work, hash_password, token_has
 logger = logging.getLogger("marshrutka")
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{40,128}\Z")
 CODE_PATTERN = re.compile(r"[A-Z2-9]{6}\Z")
-SERVER_REVISION = "2.3.0-beta.1"
+SERVER_REVISION = "2.3.0-beta.2"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

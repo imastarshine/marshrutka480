@@ -1106,6 +1106,11 @@ class SharedTraffic:
             pose = self._pose(npc)
             self._snapshot_cells[self._cell(pose["wx"], pose["wy"])].append(pose)
 
+    def snapshot(self):
+        """One immutable-tick list for every recipient in this room."""
+        return sorted((pose for poses in self._snapshot_cells.values() for pose in poses),
+                      key=lambda pose: pose["id"])
+
     def snapshot_for(self, player):
         pose = self._player_pose(player)
         if pose is None:

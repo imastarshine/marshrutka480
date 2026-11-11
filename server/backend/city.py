@@ -83,8 +83,9 @@ class CityRoom:
         return {"type": "state", "room": self.info(),
                 "players": [p.snapshot() for p in self.players.values() if not p.abandoned],
                 "seed": self.seed, "server_time": self.world_time, "started_at": self.started_at,
-                "world": {"authoritative_traffic": True, "version": 1},
-                "traffic": self.traffic.snapshot_for(self.players.get(user_id)),
+                "world": {"authoritative_traffic": True, "version": 2, "id": self.round_id,
+                          "traffic_tick": self.tick},
+                "traffic": self.traffic.snapshot(),
                 "traffic_server_time": self.world_time,
                 "tick": self.tick, "results": [], "ranked": False}
 

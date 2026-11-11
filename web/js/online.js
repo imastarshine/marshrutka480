@@ -23,6 +23,10 @@ class CitySession {
         this.drawnTraffic = 0;
     }
     get active() { return Boolean(this.state?.room?.mode === "city"); }
+    get requiresServerTraffic() {
+        return this.active || Boolean(window.app?.mode === "online" &&
+            (window.app?.room?.mode === "city" || window.app?.publicWanted));
+    }
     get authoritativeTraffic() { return this.active && this.authoritativeTrafficEnabled; }
     clear() {
         if (this.boundGame) { this.boundGame.serverWorldEnabled = false; this.boundGame.serverCars = []; }
@@ -35,7 +39,7 @@ class CitySession {
     receive(state) {
         if (state.room?.mode !== "city") return;
         const now = performance.now();
-        if (this.state && (this.state.room.code !== state.room.code || this.state.seed !== state.seed)) {
+        if (this.state && (this.state.room.code !== state.room.code || this.state.seed !== state.seed || this.state.world?.id !== state.world?.id)) {
             this.samples.clear(); this.serverPerfOffset = null; this.lastRenderTime = -Infinity;
             this.trafficSamples.clear(); this.trafficFirstSeen.clear(); this.authoritativeTrafficEnabled = false;
         }

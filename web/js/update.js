@@ -3,8 +3,10 @@
 
 class GameUpdate extends GameCore {
     cityTrafficActors() {
-        if (this.cityActorFrame !== this.frame) {
-            this.cityActors = this.serverTrafficActive ? window.citySession.traffic() : (this.localTraffic?.poses() || []);
+        const network = this.networkTrafficRequired;
+        if (this.cityActorFrame !== this.frame || this.cityActorNetwork !== network) {
+            this.cityActorNetwork = network;
+            this.cityActors = network ? window.citySession.traffic() : (this.localTraffic?.poses() || []);
             this.cityActorFrame = this.frame;
         }
         return this.cityActors || [];
@@ -12,7 +14,7 @@ class GameUpdate extends GameCore {
     // --- обновление ---
     updateCars() {
         if (this.unifiedWorld) {
-            if (!this.serverTrafficActive) this.localTraffic?.update(this, 1 / 60);
+            if (!this.networkTrafficRequired) this.localTraffic?.update(this, 1 / 60);
             this.cityActorFrame = -1;
             this.cityTrafficActors();
             this.serverCars = [];
