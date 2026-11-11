@@ -24,6 +24,7 @@ class GameCore {
     }
 
     reset() {
+        window.citySession?.onReset();
         const up = this.save.upgrades;
         setRoad(streetLanes(true, 0));
         this.model = BUS_MODELS.find((m) => m.key === this.save.bus) || BUS_MODELS[0];
@@ -317,6 +318,7 @@ class GameCore {
         this.hornCool = 20;
         this.hornT = 26;
         hornSound();
+        window.app?.broadcastHorn();
         const bus = this.bus;
         this.floatText("БИП!", bus.x, bus.y - 24, [255, 180, 80]);
         for (const car of this.cars) {
@@ -635,6 +637,7 @@ class GameCore {
 
     startTurn(sign, inter) {
         const bus = this.bus;
+        window.citySession?.captureTurn(this);
         // снимок старой улицы: во время поворота камера плавно доворачивает с неё на новую
         this.drawWorld(false);
         this.snapshot.getContext("2d").drawImage(canvas, 0, 0);

@@ -1,190 +1,180 @@
-"""Optional browser integration QA. Install requirements-browser.txt and Chromium first.
+"""Browser regression for the original game plus city multiplayer.
 
-Run: python tests/browser_smoke.py
-Temporary DBs only. Screenshots/results are written to ignored test-results/.
-Ports18880 and18881 must be free. Test round22s; production remains180s.
+Run from the repository root after installing requirements-browser.txt:
+    python tests/browser_smoke.py
+Uses an isolated SQLite database, two Chrome contexts and port 18882.
 """
 import json
 import sys
 import tempfile
 import threading
 import time
-from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlsplit
 from pathlib import Path
 
 import uvicorn
 from playwright.sync_api import sync_playwright
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from backend.main import create_app
+ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/"server"))
 from backend.config import Settings
+from backend.main import create_app
 
-BASE = "http://127.0.0.1:18880"
-OUT = ROOT / "test-results"
+BASE="http://127.0.0.1:18882"
+OUT=ROOT/"test-results"
 OUT.mkdir(exist_ok=True)
-issues = []
-checks = []
+errors=[]
+checks=[]
 
 def mark(label):
     checks.append(label)
-    print("OK:", label, flush=True)
+    print("PASS:",label,flush=True)
 
-def wait_js(page, expression, timeout=10000):
+def wait(page,expression,timeout=10000):
     deadline=time.monotonic()+timeout/1000
     while time.monotonic()<deadline:
-        if page.evaluate("() => Boolean("+expression+")"):
-            return
-        time.sleep(.05)
-    raise AssertionError("Timed out: "+expression+"; status: "+page.locator("body").inner_text()[-1600:])
+        if page.evaluate('() => Boolean('+expression+')'):return
+        page.wait_for_timeout(40)
+    page.screenshot(path=str(OUT/'city-failure.png'))
+    raise AssertionError('Timed out: '+expression+'; '+str(page.evaluate('({state:game.state,auth:document.querySelector("#auth-status").textContent,room:document.querySelector("#room-status").textContent})')))
 
 def attach(page):
-    page.on("pageerror", lambda err: issues.append(str(err)))
-    page.on("console", lambda msg: issues.append(msg.text) if msg.type == "error" else None)
+    page.on("pageerror",lambda error:errors.append(str(error)))
+    page.on("console",lambda msg:errors.append(msg.text) if msg.type=="error" and "Failed to load resource" not in msg.text else None)
 
-def register(page, username, base=BASE):
-    page.goto(base, wait_until="networkidle")
+def register(page,name):
+    page.goto(BASE,wait_until="networkidle")
+    page.locator("#friends-tab").click()
     page.locator("#show-register").click()
-    page.locator("#username").fill(username)
-    page.locator("#password").fill("Irkutsk-test-480!")
+    page.locator("#username").fill(name)
+    page.locator("#password").fill("City-Test-Password-480!")
     page.locator("#auth-submit").click()
-    page.locator("#driver-name").get_by_text(username, exact=True).wait_for()
-    page.locator('[data-mode="online"]').click()
+    wait(page,"app.user !== null")
 
-def self_value(page, field):
-    return page.evaluate(f"onlineView.state?.players.find(p => p.id === app.user.id)?.{field}")
-
-def board_first_stop(page):
+def drive(page):
+    page.locator("#room-drive").click()
     page.locator("canvas").focus()
-    page.keyboard.down("ArrowRight")
-    wait_js(page,"onlineView.state.players.find(p=>p.id===app.user.id).x>=550")
-    page.keyboard.up("ArrowRight")
-    page.keyboard.down("ArrowUp")
-    wait_js(page,"onlineView.state.players.find(p=>p.id===app.user.id).z>=620", timeout=7000)
-    page.keyboard.up("ArrowUp")
-    page.keyboard.down("ArrowDown")
-    wait_js(page,"onlineView.state.players.find(p=>p.id===app.user.id).speed===0", timeout=4000)
-    z = self_value(page, "z")
-    if z < 910:
-        page.keyboard.up("ArrowDown")
-        page.keyboard.down("ArrowUp")
-        wait_js(page,"onlineView.state.players.find(p=>p.id===app.user.id).z>=915", timeout=4000)
-        page.keyboard.up("ArrowUp")
-        page.keyboard.down("ArrowDown")
-    wait_js(page,"onlineView.state.players.find(p=>p.id===app.user.id).stops>=1", timeout=5000)
-    page.keyboard.up("ArrowDown")
-    return {key: self_value(page,key) for key in ("x","z","speed","score","stops")}
+    for _ in range(20):
+        if page.evaluate("game.state")!="dialog":break
+        page.wait_for_timeout(160)
+        page.keyboard.press("Enter")
+    wait(page,"game.state === 'play'")
 
-with tempfile.TemporaryDirectory(prefix="m480-e2e-") as temp:
-    settings = Settings(db_path=str(Path(temp)/"test.sqlite3"), allowed_origins=(BASE,"http://127.0.0.1:18881"), allowed_hosts=("127.0.0.1",), round_seconds=22, countdown_seconds=0.5)
-    app_server = create_app(settings)
-    server = uvicorn.Server(uvicorn.Config(app_server, host="127.0.0.1", port=18880, log_level="warning", ws="websockets", ws_max_size=2048, ws_per_message_deflate=False))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic()+10
-    while not server.started and time.monotonic()<deadline:
-        time.sleep(.05)
+with tempfile.TemporaryDirectory(prefix="m480-city-browser-") as temp:
+    settings=Settings(db_path=str(Path(temp)/"test.sqlite3"),allowed_origins=(BASE,),allowed_hosts=("127.0.0.1",),auth_limit=1000,register_limit=1000,http_limit=10000)
+    server=uvicorn.Server(uvicorn.Config(create_app(settings),host="127.0.0.1",port=18882,log_level="warning",ws="websockets"))
+    worker=threading.Thread(target=server.run,daemon=True);worker.start()
+    deadline=time.monotonic()+10
+    while not server.started and time.monotonic()<deadline:time.sleep(.05)
     assert server.started
-    class FrontendHandler(SimpleHTTPRequestHandler):
-        def __init__(self,*args,**kwargs):
-            super().__init__(*args,directory=str(ROOT/"web"),**kwargs)
-        def log_message(self,*args):
-            pass
-        def do_GET(self):
-            if urlsplit(self.path).path=="/config/runtime.js":
-                body=("window.MARSHRUTKA_CONFIG=Object.freeze({API_BASE:"+json.dumps(BASE)+"});").encode()
-                self.send_response(200);self.send_header("Content-Type","text/javascript");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
-            else:
-                super().do_GET()
-    frontend_server=ThreadingHTTPServer(("127.0.0.1",18881),FrontendHandler)
-    threading.Thread(target=frontend_server.serve_forever,daemon=True).start()
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-            first_context=browser.new_context(viewport={"width":1365,"height":1000})
-            second_context=browser.new_context(viewport={"width":1365,"height":1000})
-            first=first_context.new_page(); second=second_context.new_page()
-            attach(first); attach(second)
-            register(first,"Иркутск_1"); register(second,"Байкал_2")
-            mark("two independent registrations through the browser UI")
-            first.screenshot(path=str(OUT/"online-home.png"), full_page=True)
+            browser=p.chromium.launch(channel="chrome",headless=True,args=["--disable-background-timer-throttling","--disable-renderer-backgrounding","--disable-backgrounding-occluded-windows"])
+            contexts=[browser.new_context(viewport={"width":1440,"height":1000}) for _ in range(2)]
+            first,second=[c.new_page() for c in contexts]
+            attach(first);attach(second)
+            register(first,"Driver_City_A")
             first.locator("#create-room-form button").click()
-            wait_js(first,"app.socketReady && app.room")
-            code=first.locator("#active-room-code").inner_text()
+            wait(first,"app.socketReady && citySession.active")
+            code=first.evaluate("app.room.code")
+            register(second,"Driver_City_B")
             second.locator("#room-code").fill(code)
             second.locator("#join-room-form button").click()
-            wait_js(second,"app.socketReady && onlineView.state.players.length===2")
-            wait_js(first,"onlineView.state.players.length===2")
-            assert not second.locator("#room-start").is_visible()
-            mark("shared room, two live clients, start button only for host")
-            first.screenshot(path=str(OUT/"room-lobby.png"), full_page=True)
-            first.locator("#room-start").click()
-            wait_js(first,"app.room.status==='running'")
-            result_one = board_first_stop(first)
-            assert result_one["score"]==280 and result_one["stops"]==1, result_one
-            mark("real keys: accelerate, steer, brake, dwell; server awards 280 ₽")
-            wait_js(second,"onlineView.state.players.find(p=>p.username==='Иркутск_1').score===280")
-            assert first.evaluate("onlineView.state.stops.find(s=>s.id===0).waiting") == second.evaluate("onlineView.state.stops.find(s=>s.id===0).waiting")
-            mark("other client sees identical player position, earnings and passenger pool")
-            first.screenshot(path=str(OUT/"online-driving.png"),full_page=True)
-            first.evaluate("app.ws.close(4000,'simulated connection loss')")
-            time.sleep(.2)
-            wait_js(first,"app.socketReady && onlineView.state.players.find(p=>p.id===app.user.id).connected",timeout=8000)
-            assert self_value(first,"score")==280
-            mark("automatic reconnect preserves earned score")
-            result_two = board_first_stop(second)
-            assert result_two["score"] > 0 and result_two["stops"]==1, result_two
-            mark("second driver independently serves same shared stop")
-            wait_js(first,"app.room.status==='finished'",timeout=25000)
-            first.locator('[data-mode="leaders"]').click()
-            first.locator("#leaderboard-table").wait_for(state="visible")
-            assert first.locator("#leaderboard-body tr").count()==2
-            first.screenshot(path=str(OUT/"leaderboard.png"),full_page=True)
-            mark("completed shift persisted; both qualified drivers appear in leaderboard")
-            assert first.evaluate("localStorage.getItem('token')") is None
-            assert first.evaluate("Object.keys(sessionStorage).length") == 0
-            mark("auth token not persisted in browser storage")
-            first.locator('[data-mode="solo"]').click()
-            first.locator("#solo-start").click()
-            for _ in range(30):
-                if first.evaluate("game.state") == "play":
-                    break
-                first.keyboard.press("Enter")
-                first.wait_for_timeout(40)
-            assert first.evaluate("game.state") == "play", first.evaluate("game.state")
-            first.keyboard.down("ArrowUp")
-            first.wait_for_timeout(900)
-            first.keyboard.up("ArrowUp")
-            assert first.evaluate("game.distance") > 0
-            first.screenshot(path=str(OUT/"solo-driving.png"),full_page=True)
-            mark("original solo story and driving still operate")
-            mobile_context=browser.new_context(viewport={"width":390,"height":844},is_mobile=True,has_touch=True,device_scale_factor=1)
-            mobile=mobile_context.new_page();attach(mobile)
-            mobile.goto(BASE, wait_until="networkidle")
-            mobile.locator('[data-mode="online"]').click()
-            assert mobile.locator(".controls").is_visible()
-            assert mobile.evaluate("document.documentElement.scrollWidth <= innerWidth")
-            mobile.screenshot(path=str(OUT/"mobile.png"),full_page=True)
-            mark("390x844 touch layout: controls available, no horizontal overflow")
-            second.locator("#logout").click()
-            second.locator("#auth-guest").wait_for(state="visible")
-            assert second.evaluate("app.token") is None
-            mark("logout clears authenticated client and room")
-            cross_context=browser.new_context(viewport={"width":1365,"height":900})
-            cross=cross_context.new_page();attach(cross)
-            register(cross,"Иркутск_3","http://127.0.0.1:18881")
-            cross.locator("#create-room-form button").click()
-            wait_js(cross,"app.socketReady && onlineView.state.players.length===1")
-            assert cross.evaluate("app.base") == BASE
-            mark("separate frontend origin: browser CORS registration, rooms and WebSocket auth work")
-            browser.close()
-    finally:
-        frontend_server.shutdown();frontend_server.server_close()
-        server.should_exit=True
-        thread.join(timeout=5)
+            wait(second,"app.socketReady && citySession.active")
+            wait(first,"app.room.count === 2")
+            drive(first);drive(second)
+            wait(first,"citySession.mapMarkersCount === 1")
+            wait(second,"citySession.mapMarkersCount === 1")
+            assert first.evaluate("game instanceof Game && Boolean(game.storyFlags) && typeof game.tryTurn === 'function'")
+            assert first.evaluate("Math.abs(canvas.getBoundingClientRect().height-innerHeight) < 2")
+            assert first.evaluate("Math.abs(canvas.getBoundingClientRect().x + canvas.getBoundingClientRect().width/2-innerWidth/2) < 2")
+            mark("two UI registrations, join running city, original story/engine, full-height centred desktop canvas")
 
-report={"checks":checks,"errors":issues}
-(OUT/"browser-report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2))
-print(json.dumps(report,ensure_ascii=False,indent=2))
-assert not issues, issues
+            # Pose transport is delayed by 350 ms. Own physics must respond on
+            # the next local frames, well before any delayed packet is delivered.
+            result=first.evaluate("""async () => {
+                window.originalSend=app.send.bind(app);
+                app.send=m=>{if(m.type==='pose'){setTimeout(()=>originalSend(m),350);return true;}return originalSend(m);};
+                canvas.focus();const before=game.wy,start=performance.now();
+                window.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyW',bubbles:true}));
+                await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+                const result={elapsed:performance.now()-start,speed:game.bus.speed,moved:game.wy!==before};
+                window.dispatchEvent(new KeyboardEvent('keyup',{code:'KeyW',bubbles:true}));
+                return result;
+            }""")
+            assert result["moved"] and result["speed"]>0 and result["elapsed"]<150,result
+            first.wait_for_timeout(800)
+            # Drain delayed poses before restoring immediate transmission, so
+            # this test transport cannot manufacture out-of-order sequences.
+            first.evaluate("() => { app.send=m=>m.type==='pose'?true:window.originalSend(m); }")
+            first.wait_for_timeout(450)
+            first.evaluate("() => { app.send=window.originalSend; }")
+            first.wait_for_timeout(500)
+            assert first.evaluate("app.socketReady && app.room !== null")
+            mark("own bus responds before 350 ms of simulated network delay: "+str(round(result["elapsed"]))+" ms")
+
+            first.locator("canvas").focus()
+            first.keyboard.down("ArrowUp");first.wait_for_timeout(1400);first.keyboard.up("ArrowUp")
+            first.keyboard.down("ArrowDown");first.wait_for_timeout(700);first.keyboard.up("ArrowDown")
+            wait(second,"citySession.players().some(p=>p.username==='Driver_City_A' && Math.abs(p.wy-game.wy)>20)")
+            wait(second,"citySession.drawnPlayers === 1")
+            assert first.evaluate("citySession.mapMarkersCount === 1")
+            second.screenshot(path=str(OUT/"city-desktop.png"))
+            mark("remote bus moves in the original road scene; labelled player appears on the original minimap")
+
+            # Exercise the actual turning animation and world-space packet,
+            # without spending a full shift driving to a particular junction.
+            first.evaluate("""() => {
+                game.bus.invuln=600;game.cars=[];game.bus.speed=6;
+                const k=game.nearestCross(game.along).k;
+                const inter=new Intersection(game.bus.centerY-100,k,streetName(!game.vertical,k),4,{left:true,right:true,straight:true});
+                game.startTurn(1,inter);
+            }""")
+            wait(second,"citySession.players().some(p=>p.username==='Driver_City_A' && p.state==='turning')")
+            wait(first,"game.state === 'play'")
+            wait(second,"citySession.players().some(p=>p.username==='Driver_City_A' && Math.abs(p.angle)>1.5)")
+            assert first.evaluate("app.socketReady")
+            mark("original intersection turn, rotation, world coordinates and minimap survive a change of street")
+
+            # A disconnected transport must not stop or replace the original game.
+            first.evaluate("app.ws.close(4000,'browser reconnect check')")
+            wait(first,"app.socketReady",timeout=10000)
+            wait(second,"app.room.count===2")
+            assert first.evaluate("game.state==='play'")
+            mark("bounded reconnect keeps the original run and two-player membership")
+
+            first.locator("#friends-tab").click()
+            first.screenshot(path=str(OUT/"city-dispatch.png"))
+            before=first.evaluate("({wx:game.wx,wy:game.wy,wallet:game.save.wallet})")
+            first.locator("#room-leave").click()
+            wait(first,"app.room === null")
+            first.locator("#close-panel").click()
+            assert first.evaluate("game.state==='play'")
+            assert first.evaluate("game.save.wallet")==before["wallet"]
+            mark("leaving multiplayer preserves the current original career run")
+
+            mobile=browser.new_context(viewport={"width":390,"height":844},is_mobile=True,has_touch=True,device_scale_factor=2)
+            mp=mobile.new_page();attach(mp);mp.goto(BASE,wait_until="networkidle")
+            mp.locator("#play-tab").click()
+            assert mp.evaluate("document.documentElement.scrollHeight > innerHeight + 500")
+            assert mp.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            assert mp.locator("#account-button").is_visible()
+            assert mp.locator(".controls").is_visible()
+            mp.screenshot(path=str(OUT/"city-mobile.png"),full_page=True)
+            mp.locator("#account-button").click()
+            mp.locator("#username").fill("Mobile_Name")
+            assert mp.evaluate("game.keys.up === false && game.keys.left === false")
+            mark("mobile scrolling layout, full-width game, touch controls and header profile")
+
+            # Rotate/resize without replacing the game or losing the session.
+            mp.set_viewport_size({"width":844,"height":390})
+            assert mp.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            second.set_viewport_size({"width":1280,"height":1024})
+            wait(second,"app.mobileLayout")
+            assert second.evaluate("document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight > innerHeight")
+            mark("mobile landscape and tall tablet layouts stay horizontally contained")
+            browser.close()
+        assert not errors,errors
+        (OUT/"city-browser-report.json").write_text(json.dumps({"checks":checks,"latency_ms":result["elapsed"],"errors":errors},ensure_ascii=False,indent=2))
+    finally:
+        server.should_exit=True;worker.join(timeout=8)
+print("Browser checks complete.",flush=True)

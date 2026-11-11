@@ -6,21 +6,23 @@
 
 ## HTTP
 
-- `GET /api/health` → `{ok:true,version:"1.0.0",protocol:1}`.
+- `GET /api/health` → `{ok:true,version:"2.0.0",protocol:1,features:["original-city","world-poses"]}`.
 - `POST /api/auth/register`, `POST /api/auth/login`, тело `{username,password}` →
   `{token,expires_at,user:{id,username}}`. Имя 3–24, латиница/кириллица/цифры/`_-`; пароль 10–128 символов.
 - `GET /api/auth/me` → `{user:{id,username}}`.
 - `POST /api/auth/logout` → `{ok:true}`.
 - `GET /api/leaderboard?limit=20` → `{entries:[{rank,username,score,stops,distance,completed_at}],mode:"online"}`.
-  Лучший законченный сетевой рейс каждого игрока, рубли; distance в игровых пикселях.
+  Лучший законченный рейс старого режима arcade. Комнаты city в рейтинг не входят.
 - `GET /api/rooms` → `{rooms:[ROOM]}` (только публичные).
-- `POST /api/rooms`, тело `{name:"Вечерний рейс",public:true,max_players:4}` → `{room:ROOM}`.
+- `POST /api/rooms`, тело `{name:"Вечерний рейс",public:true,max_players:4,mode:"city"}` → `{room:ROOM}`.
   Комната создаётся с владельцем-участником. max_players 1–8. Непубличная доступна по коду.
+  mode: `city|arcade`; по умолчанию arcade для совместимости старых клиентов.
 - `POST /api/rooms/CODE/join`, тело `{}` → `{room:ROOM}`.
 - `POST /api/rooms/CODE/leave`, тело `{}` → `{ok:true}`.
 
-`ROOM = {code,name,public,max_players,host_id,status,players:[{id,username,connected}],count}`;
-status: `waiting|countdown|running|finished`. Новые участники допускаются только waiting/finished.
+`ROOM = {code,name,public,mode,max_players,host_id,status,players:[{id,username,connected}],count}`;
+status: `waiting|countdown|running|finished`. City сразу running и допускает поздний вход.
+Arcade допускает новых участников только в waiting/finished.
 
 ## WebSocket
 
@@ -29,6 +31,50 @@ status: `waiting|countdown|running|finished`. Новые участники до
 Сервер отвечает `{type:"welcome",player_id:1,protocol:1}`. Токен не передаётся в URL.
 Один активный сокет на аккаунт. После обрыва можно повторить auth в течение 20 секунд,
 чтобы продолжить тот же рейс с теми же данными. Вход через HTTP join повторять не требуется.
+
+## City: оригинальный городской движок
+
+Новый интерфейс использует только этот режим. Своя физика работает локально
+с шагом 60 Гц; 20 раз/с клиент отправляет:
+
+```json
+{"type":"pose","seq":1,"wx":0,"wy":-250,"lateral":111,"angle":0,
+ "speed":6,"jump":0,"door":0,"braking":false,"bus":"gazel",
+ "route":"480","state":"play","street":"ул. Ленина"}
+```
+
+`wx/wy` — точка на оси улицы, x на восток, y на юг.
+`angle` — радианы по часовой стрелке от севера; `lateral` — смещение вправо
+от оси. Центр автобуса: `(wx + cos(angle)*lateral, wy + sin(angle)*lateral)`.
+Скорость в пикселях за исходный шаг игры, двери 0..1, jump в пикселях.
+Модель, маршрут и состояние ограничены исходными значениями игры.
+Числа должны быть конечными; лишние поля, включая деньги, запрещены.
+
+Сервер проверяет членство, seq и предел перемещения. При отказе возвращает
+`{type:"correction",pose:последнее_принятое_положение}`. Клиент показывает
+сообщение; свою маршрутку сетевой снимок не перемещает.
+
+При начале нового рейса отправляется `{type:"spawn"}` (не чаще раза в 2 с),
+после него — новое положение. `ping` каждые 3 с, `horn` не чаще раза в 2 с,
+`leave` работают как ниже. Команда `start` не нужна.
+
+Снимки приходят 10 раз/с:
+`{type:"state",room:ROOM,players:[CITY_PLAYER],seed,server_time,started_at,tick,
+results:[],ranked:false}`.
+`CITY_PLAYER` содержит `id,username,color,number,connected` и поля pose;
+до первого положения содержит только `state:"menu"`.
+Номер и цвет назначает сервер. Чужие маршрутки интерполируются в течение
+100 мс, своя маршрутка всегда использует непосредственный локальный ввод.
+Общее время и seed задают фазы светофоров. Повороты, двери, прыжки,
+положение на дороге и метки на миникарте отображаются исходным рендерером.
+
+NPC, пассажиры и прогресс карьеры локальные. Результаты city не загружаются
+в таблицу arcade; server не подтверждает клиентскую выручку.
+При выходе из комнаты игрок продолжает свой одиночный рейс.
+
+## Arcade: сохранённая совместимость
+
+Этот формат обслуживает старые клиенты. Новый интерфейс его не использует.
 
 Клиент → сервер:
 

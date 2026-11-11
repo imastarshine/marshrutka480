@@ -1,154 +1,131 @@
-// Presentation only: movement, passengers and scores are authoritative on the server.
+// Multiplayer is an overlay on the original Game. Only remote buses interpolate.
 "use strict";
-class OnlineView {
-    constructor() { this.previous = null; this.state = null; this.received = 0; this.buses = new Map(); this.playerId = null; this.horns = new Map(); }
-    reset() { this.previous = null; this.state = null; this.buses.clear(); }
+class CitySession {
+    constructor() {
+        this.playerId = null;
+        this.state = null;
+        this.previous = new Map();
+        this.received = 0;
+        this.buses = new Map();
+        this.horns = new Map();
+        this.clockOffset = 0;
+        this.pendingSpawn = false;
+        this.turnFrom = null;
+        this.mapMarkersCount = 0;
+        this.drawnPlayers = 0;
+    }
+    get active() { return Boolean(this.state?.room?.mode === "city"); }
+    clear() {
+        this.state = null; this.previous.clear(); this.buses.clear(); this.horns.clear();
+        this.turnFrom = null; this.mapMarkersCount = 0; this.drawnPlayers = 0;
+    }
     receive(state) {
-        this.previous = this.state;
+        if (state.room?.mode !== "city") return;
+        const now = performance.now();
+        this.previous = new Map(this.players(now).map(p => [p.id, p]));
         this.state = state;
-        this.received = performance.now();
-        if (this.previous?.room?.status !== state.room?.status) this.previous = null;
+        this.received = now;
+        this.clockOffset = state.server_time * 1000 - Date.now();
+        const ids = new Set(state.players.map(p => p.id));
+        for (const id of this.buses.keys()) if (!ids.has(id)) this.buses.delete(id);
+        for (const id of this.horns.keys()) if (!ids.has(id)) this.horns.delete(id);
     }
-    color(value) {
-        if (Array.isArray(value)) return value;
-        if (/^#[0-9a-f]{6}$/i.test(value || "")) return [1, 3, 5].map(n => parseInt(value.slice(n, n + 2), 16));
-        return [243, 206, 86];
-    }
-    entities(name, now) {
-        const current = this.state?.[name] || [];
-        if (!this.previous) return current;
-        const old = new Map((this.previous[name] || []).map(e => [e.id, e]));
+    players(now = performance.now()) {
         const t = clamp((now - this.received) / 100, 0, 1);
-        return current.map(e => {
-            const before = old.get(e.id);
-            return before ? { ...e, x: before.x + (e.x - before.x) * t, z: before.z + (e.z - before.z) * t } : e;
+        return (this.state?.players || []).filter(p => p.id !== this.playerId && Number.isFinite(p.wx)).map(p => {
+            const before = this.previous.get(p.id);
+            if (!before || Math.hypot(p.wx - before.wx, p.wy - before.wy) > 900) return p;
+            const angleDelta = Math.atan2(Math.sin(p.angle - before.angle), Math.cos(p.angle - before.angle));
+            return {...p, wx:before.wx+(p.wx-before.wx)*t, wy:before.wy+(p.wy-before.wy)*t,
+                lateral:before.lateral+(p.lateral-before.lateral)*t, angle:before.angle+angleDelta*t};
         });
     }
-    draw(now) {
-        ctx = screenCtx;
-        ctx.save();
-        const players = this.entities("players", now);
-        const me = players.find(p => p.id === this.playerId) || players[0];
-        const z = me?.z || 0;
-        const active = this.state?.room?.status || "welcome";
-        this.drawRoad(z, now);
-        for (const stop of this.state?.stops || []) this.drawStop(stop, z, me);
-        for (const car of this.entities("npcs", now)) {
-            const y = 600 - (car.z - z);
-            if (y < -120 || y > 880) continue;
-            ctx.save();ctx.translate(car.x, y);if (car.speed < 0) ctx.rotate(Math.PI);
-            drawCarBody({ x:-25, y:-46, w:50, h:92 }, this.color(car.color), false);ctx.restore();
+    onReset() { this.pendingSpawn = true; this.turnFrom = null; if(window.app)window.app.garageReturnState=null; }
+    captureTurn(g) { this.turnFrom = {wx:g.wx, wy:g.wy, angle:Math.atan2(g.dir[0], -g.dir[1])}; }
+    pose(g) {
+        let wx = g.wx, wy = g.wy, angle = Math.atan2(g.dir[0], -g.dir[1]);
+        if (g.state === "turning" && this.turnFrom) {
+            const t = smooth(1-g.turnT/g.turnTotal);
+            wx = this.turnFrom.wx+(wx-this.turnFrom.wx)*t;
+            wy = this.turnFrom.wy+(wy-this.turnFrom.wy)*t;
+            const delta = Math.atan2(Math.sin(angle-this.turnFrom.angle), Math.cos(angle-this.turnFrom.angle));
+            angle = this.turnFrom.angle+delta*t;
         }
-        const ordered = players.slice().sort((a,b) => Number(a.id === this.playerId) - Number(b.id === this.playerId));
-        for (const p of ordered) this.drawPlayer(p, z, now);
-        if (!players.length) this.drawPlayer({ id:-1, username:"ТВОЯ ГАЗЕЛЬ", color:"#f3ce56", x:411, z:0, speed:0, score:0, connected:true }, z, now);
-        this.drawHud(me, active, now);
-        if (active === "welcome") this.overlay("НА ОДНОЙ ВОЛНЕ", ["Иркутск. Маршрут 480. Общий рейс.", "Войди и создай комнату — или введи код друга.", "До 8 водителей · 3 минуты · один город"], "02 / СЕТЕВОЙ РЕЖИМ");
-        if (active === "waiting") this.overlay("СОБИРАЕМ ЭКИПАЖ", [this.state.room.name, `Комната ${this.state.room.code} · ${players.length} на линии`, "Пригласи друзей и нажми «Начать общий рейс»."], "ДИСПЕТЧЕР НА СВЯЗИ");
-        if (active === "countdown") {
-            panel(230,270,180,180,.94,YELLOW);
-            text(String(Math.max(1,Math.ceil(this.state.countdown || 1))),320,350,YELLOW,94,{bold:true,align:"center",base:"middle"});
-            text("ПОЕХАЛИ ЧЕРЕЗ",320,290,[172,184,163],12,{align:"center"});
-        }
-        if (active === "finished") {
-            const result = this.state.results?.find(p => p.id === this.playerId);
-            this.overlay("СМЕНА ЗАВЕРШЕНА", [`Твоя выручка: ${result?.score ?? me?.score ?? 0} ₽`, `Остановок: ${result?.stops ?? me?.stops ?? 0} · Увидимся на следующем рейсе`, result?.qualified ? "Результат сохранён в общем рейтинге." : "Для рейтинга обслужи хотя бы одну остановку."], "СПАСИБО ЗА СМЕНУ");
-        }
-        ctx.restore();
+        return {wx,wy,lateral:g.bus.x-roadMiddle(),angle:Math.atan2(Math.sin(angle),Math.cos(angle)),
+            speed:g.state==="play"?g.bus.speed:0,jump:g.bus.z,door:g.bus.doorOpen,braking:g.bus.braking,
+            bus:g.model.key,route:g.route.num,state:g.state,street:g.currentStreet()};
     }
-    drawRoad(z, now) {
-        fillRect(0,0,640,760,[78,91,67]);
-        for (let k = Math.floor((z-250)/400); k <= Math.ceil((z+900)/400); k++) {
-            const y = 600 - (k*400-z), r = seeded(k * 1171 + 7625);
-            const shade = Math.floor(r()*25);
-            fillRect(5,y-190,57,145,[112+shade,107+shade,89+shade],1,3);
-            fillRect(11,y-185,45,136,[132+shade,121+shade,99+shade],1,2);
-            for(let wy=0;wy<6;wy++) for(let wx=0;wx<2;wx++) fillRect(17+wx*22,y-175+wy*21,11,12,[72,84,80]);
-            fillRect(4,y-45,61,8,[67,72,59]);
-            tree(36,y+28,17);tree(30,y+100,22);
-            fillRect(608,y-140,32,125,[124,109,89]);
-            fillRect(614,y-134,26,114,[145,129,101]);
-            for(let wy=0;wy<5;wy++) fillRect(619,y-124+wy*21,12,11,[78,87,82]);
-            tree(624,y+68,18);
-        }
-        fillRect(68,0,10,760,[148,151,132]);
-        fillRect(78,0,444,760,[59,65,59]);
-        fillRect(522,0,68,760,[74,79,69]);
-        fillRect(590,0,10,760,[148,151,132]);
-        for (let y = mod(z, 30)-30; y < 790; y+=30) {
-            fillRect(68,y,5,15,[192,191,169]);fillRect(595,y,5,15,[192,191,169]);
-        }
-        line(294,0,294,760,[213,199,115],2);line(302,0,302,760,[213,199,115],2);
-        for (const x of [152,226,374,448]) for(let y=mod(z,94)-94;y<850;y+=94) fillRect(x,y,3,42,[188,194,176]);
-        line(86,0,86,760,[178,188,168],2);line(516,0,516,760,[178,188,168],2);
-        for(let y=mod(z,96)-96;y<850;y+=96) fillRect(525,y,3,42,[178,188,168]);
-        for(let k=Math.floor((z-300)/3600);k<=Math.ceil((z+900)/3600);k++) {
-            const y=600-(k*3600-z);
-            if(y < -100 || y > 850) continue;
-            fillRect(78,y-55,444,110,[61,67,60]);
-            for(let x=94;x<510;x+=28) {fillRect(x,y-50,15,20,[187,190,171]);fillRect(x,y+32,15,20,[187,190,171]);}
-            line(78,y-65,522,y-65,[141,152,131],2);line(78,y+65,522,y+65,[141,152,131],2);
+    beforeTick(g) {
+        if (!this.active) return;
+        // The same intersection uses the same light phase for everyone on this street.
+        const worldFrame = Math.floor((Date.now()+this.clockOffset)/1000*60);
+        for (const inter of g.inters) {
+            const [i,j] = g.node(inter.k);
+            inter.t = worldFrame + Math.floor(hash(i,j,this.state.seed)*CYCLE) + (g.vertical?0:GREEN_T+YELLOW_T);
         }
     }
-    drawStop(stop, z, me) {
-        const y = 600-(stop.z-z);if(y < -190 || y > 950) return;
-        const next = stop.id === me?.next_stop;
-        const c = stop.waiting > 0 ? [243,206,86] : [137,147,130];
-        fillRect(523,y-135,66,270,[96,98,72]);
-        strokeRect(530,y-127,51,254,c,next?3:1,5,.85);
-        for(let dy=-105;dy<120;dy+=28) line(531,y+dy,541,y+dy-10,c,2,.5);
-        fillRect(597,y-96,38,95,[41,52,46],1,3);
-        fillRect(595,y-99,42,10,[110,158,123],1,2);
-        for(let i=0;i<Math.min(stop.waiting,6);i++){const px=604+(i%2)*18,py=y+15+Math.floor(i/2)*21;fillRect(px-4,py,8,11,PEOPLE_COLORS[i%PEOPLE_COLORS.length],1,2);circle(px,py-4,4,SKIN);}
-        fillRect(591,y-149,5,37,[171,180,161]);fillRect(581,y-160,26,25,[81,137,183],1,3);text("А",594,y-147,WHITE,17,{bold:true,align:"center",base:"middle"});
-        const w=Math.min(300,textWidth(stop.name,14,true)+30);
-        panel(640-w-20,y-192,w,30,.94,c);text(stop.name,630-w+5,y-176,c,14,{bold:true,base:"middle"});
-        if(next) {text("ТВОЯ ОСТАНОВКА",513,y+154,YELLOW,11,{bold:true,align:"right"});text(`${stop.waiting} пассажиров`,581,y+138,c,11,{align:"right"});}
+    color(p) {
+        return /^#[0-9a-f]{6}$/i.test(p.color||"") ? [1,3,5].map(n=>parseInt(p.color.slice(n,n+2),16)) : [90,205,230];
     }
-    drawPlayer(p, z, now) {
-        const y=600-(p.z-z);if(y < -170 || y > 930) return;
-        let bus=this.buses.get(p.id);
-        if(!bus){bus=new Bus({}, {...BUS_MODELS[0],color:this.color(p.color)},"480");this.buses.set(p.id,bus);}
-        bus.speed=p.speed/60;bus.braking=p.id===this.playerId && Boolean(window.app?.keys.down);bus.doorOpen=p.boarding>0?1:0;
-        ctx.save();if(!p.connected)ctx.globalAlpha=.45;if(p.invulnerable && Math.floor(now/120)%2)ctx.globalAlpha=.65;
-        bus.draw(Math.floor(now/16),{x:p.x,y,angle:0});ctx.restore();
-        const own=p.id===this.playerId;
-        if(own) {ring(p.x,y+76,5,YELLOW,2);line(p.x,y+66,p.x,y+71,YELLOW,2);}
-        const name=own?`${p.username} · ТЫ`:p.username;
-        const width=textWidth(name,12,true)+18;
-        fillRect(p.x-width/2,y-84,width,22,[20,27,22],.94,5);
-        text(name,p.x,y-73,own?YELLOW:this.color(p.color),12,{bold:true,align:"center",base:"middle"});
-        if(p.boarding>0) {fillRect(p.x-29,y+65,58,5,[28,41,27],1,3);fillRect(p.x-29,y+65,58*p.boarding,5,GREEN,1,3);}
-        if((this.horns.get(p.id)||0)>now) {ring(p.x,y-52,60+(now%300)/20,YELLOW,2);text("БИП!",p.x+42,y-20,YELLOW,14,{bold:true});}
+    visible(p) { return !["intro","menu","over"].includes(p.state); }
+    worldPosition(p) {
+        return [p.wx+Math.cos(p.angle)*p.lateral,p.wy+Math.sin(p.angle)*p.lateral];
     }
-    drawHud(me, active, now) {
-        fillRect(0,0,640,94,[20,27,23],.96);
-        fillRect(16,15,61,40,YELLOW,1,6);text("480",46,36,BLACK,26,{bold:true,align:"center",base:"middle"});
-        text(me?.street || this.state?.street || "ИРКУТСК · ОБЩИЙ РЕЙС",93,17,WHITE,16,{bold:true});
-        text(`${this.state?.room?.code || "ДИСПЕТЧЕРСКАЯ"}  /  ${this.state?.players?.length || 0} НА ЛИНИИ`,94,43,[155,174,147],11);
-        const seconds=Math.max(0,Math.ceil(this.state?.time_left??180));
-        text(`${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,"0")}`,620,18,YELLOW,25,{bold:true,align:"right"});
-        text(active==="running"?"ДО КОНЦА СМЕНЫ":"ОБЩИЙ РЕЙС",620,48,[155,174,147],10,{align:"right"});
-        line(16,65,624,65,[61,75,58],1);
-        text(`${Math.round((me?.speed||0)*7/60)} км/ч`,20,75,WHITE,12,{bold:true});
-        text(`${me?.score??0} ₽`,170,75,YELLOW,12,{bold:true});
-        text(`ОСТАНОВОК ${me?.stops??0}`,305,75,[173,190,164],11);
-        const ping=window.app?.latency;
-        text(ping!=null?`${ping} мс`:(active==="welcome"?"ОНЛАЙН":"НА СВЯЗИ"),620,75,[173,190,164],11,{align:"right"});
-        if(active==="running") {
-            const stop=(this.state.stops||[]).find(s=>s.id===me?.next_stop);
-            panel(16,683,608,61,.94,[92,115,81]);
-            if(me?.boarding>0){text("ПОСАДКА ПАССАЖИРОВ",30,696,YELLOW,13,{bold:true});text("Держи тормоз, пока двери открыты",30,719,[181,198,170],12);}
-            else if(stop){text(`ДАЛЬШЕ: ${stop.name}`,30,696,YELLOW,13,{bold:true});const distance=Math.max(0,Math.round((stop.z-me.z)*METERS_PER_PX));text(`Через ${distance} м · в правый карман и полный тормоз`,30,719,[181,198,170],12);}
-            else{text("ГОРОД НА СВЯЗИ",30,696,YELLOW,13,{bold:true});text("Газ — W / ↑    Руль — A D / ← →    Тормоз — S / ↓",30,719,[181,198,170],12);}
+    project(g,p) {
+        const [wx,wy] = this.worldPosition(p), dx = wx-g.wx, dy = wy-g.wy;
+        return {x:roadMiddle()-g.dir[1]*dx+g.dir[0]*dy,
+            y:g.bus.centerY-g.dir[0]*dx-g.dir[1]*dy,
+            angle:p.angle-Math.atan2(g.dir[0],-g.dir[1])};
+    }
+    drawPlayers(g) {
+        this.drawnPlayers = 0;
+        if (!this.active) return;
+        const now = performance.now();
+        for (const p of this.players(now)) {
+            if (!this.visible(p)) continue;
+            const view = this.project(g,p);
+            if (view.x < -MARGIN-160 || view.x > WIDTH+MARGIN+160 || view.y < -200 || view.y > HEIGHT+200) continue;
+            let bus = this.buses.get(p.id);
+            if (!bus || bus.model.key !== p.bus || bus.route !== p.route) {
+                const model = BUS_MODELS.find(b=>b.key===p.bus)||BUS_MODELS[0];
+                bus = new Bus({},model,p.route);this.buses.set(p.id,bus);
+            }
+            bus.speed=p.speed;bus.braking=p.braking;bus.doorOpen=p.door;
+            ctx.save();ctx.globalAlpha=p.connected?0.95:0.35;
+            bus.draw(g.frame,{...view,y:view.y-(p.jump||0)*.3});
+            const label = p.number+" · "+p.username;
+            const w = Math.min(200,textWidth(label,12,true)+18);
+            fillRect(view.x-w/2,view.y-bus.h/2-29,w,22,[14,23,20],.94,4);
+            text(label,view.x,view.y-bus.h/2-18,this.color(p),12,{bold:true,align:"center",base:"middle"});
+            if ((this.horns.get(p.id)||0)>now) {
+                text("БИП!",view.x+bus.w/2+8,view.y-20,YELLOW,14,{bold:true});
+                ring(view.x,view.y-bus.h/2,42+(now%250)/12,this.color(p),2);
+            }
+            ctx.restore();this.drawnPlayers++;
         }
     }
-    overlay(title, lines, eyebrow) {
-        fillRect(0,95,640,665,[11,19,14],.56);
-        panel(37,230,566,240,.96,[113,130,87]);
-        text(eyebrow,320,257,[159,181,140],12,{align:"center"});
-        text(title,320,292,YELLOW,31,{bold:true,align:"center"});
-        line(180,338,460,338,[73,92,58],1);
-        lines.forEach((v,i)=>text(v,320,360+i*30,i===0?WHITE:[166,186,151],14,{align:"center"}));
+    drawMinimap(g,{bx,by,size,toMap,cx,cy}) {
+        this.mapMarkersCount=0;
+        if (!this.active) return;
+        for (const p of this.players()) {
+            if (!this.visible(p)) continue;
+            let [x,y]=toMap(...this.worldPosition(p));
+            const dx=x-cx,dy=y-cy,edge=size/2-12;
+            const outside=Math.max(Math.abs(dx),Math.abs(dy))>edge;
+            if (outside) {const k=edge/Math.max(Math.abs(dx),Math.abs(dy));x=cx+dx*k;y=cy+dy*k;}
+            const color=this.color(p);
+            ctx.save();ctx.globalAlpha=p.connected?1:.4;
+            if (outside) {
+                const a=Math.atan2(dy,dx);
+                poly([[x+Math.cos(a)*9,y+Math.sin(a)*9],[x+Math.cos(a+2.4)*7,y+Math.sin(a+2.4)*7],[x+Math.cos(a-2.4)*7,y+Math.sin(a-2.4)*7]],color);
+            } else {
+                circle(x,y,9,[12,22,18]);ring(x,y,8,color,2);
+                line(x+Math.sin(p.angle)*8,y-Math.cos(p.angle)*8,x+Math.sin(p.angle)*13,y-Math.cos(p.angle)*13,color,2);
+            }
+            text(String(p.number),x,y,color,10,{bold:true,align:"center",base:"middle"});
+            const labelX=clamp(x+12,bx+4,bx+size-60);
+            text(p.username.slice(0,8),labelX,clamp(y-19,by+4,by+size-14),color,9,{bold:true,shadow:true});
+            ctx.restore();this.mapMarkersCount++;
+        }
     }
 }

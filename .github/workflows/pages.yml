@@ -1,6 +1,6 @@
-name: Publish frontend to GitHub Pages
+name: Publish original offline game to GitHub Pages
 
-# Publication is explicitly started in Actions. The Python server is NOT uploaded.
+# Publication is explicitly started in Actions. Keep Pages on the original game.
 on:
   workflow_dispatch:
 
@@ -17,9 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      - name: Prepare original offline game
+        run: |
+          mkdir _pages
+          cp index.html _pages/
+          cp -R js _pages/js
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: web
+          path: _pages
   deploy:
     needs: upload
     runs-on: ubuntu-latest

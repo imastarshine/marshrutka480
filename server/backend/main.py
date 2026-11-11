@@ -22,7 +22,8 @@ from pydantic import ValidationError
 from .config import Settings
 from .database import Database
 from .middleware import SecurityMiddleware
-from .models import ActionMessage, AuthMessage, CreateRoom, Credentials, EmptyBody, InputMessage, PingMessage
+from .models import ActionMessage, AuthMessage, CityPoseMessage, CreateRoom, Credentials, EmptyBody, InputMessage, PingMessage
+from .city import CityRoom
 from .rooms import Connection, RoomManager
 from .security import RateLimiter, bounded_thread_work, hash_password, token_hash, verify_password
 
@@ -105,7 +106,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok":True,"version":"1.0.0","protocol":1}
+        return {"ok":True,"version":"2.0.0","protocol":1,"features":["original-city","world-poses"]}
 
     @app.post("/api/auth/register",status_code=201)
     async def register(body: Credentials, request: Request):
@@ -149,7 +150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/rooms",status_code=201)
     async def create_room(body: CreateRoom, user=Depends(identity)):
         rate("rooms:"+str(user["id"]),12)
-        room = app.state.rooms.create(user,body.name,body.public,body.max_players)
+        room = app.state.rooms.create(user,body.name,body.public,body.max_players,body.mode)
         return {"room":room.info()}
 
     @app.post("/api/rooms/{code}/join")
@@ -241,7 +242,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await ws.close(code=4004,reason="Комната закрыта")
                     break
                 try:
-                    if message.get("type")=="input":
+                    if message.get("type")=="pose":
+                        if not isinstance(room, CityRoom):
+                            raise ValueError("City room required")
+                        obj = CityPoseMessage.model_validate(message)
+                        if obj.seq <= conn.seq:
+                            raise ValueError("replayed pose sequence")
+                        conn.seq = obj.seq
+                        if not room.update_pose(conn.user_id, obj):
+                            conn.send({"type":"correction","pose":room.players[conn.user_id].pose})
+                    elif message.get("type")=="input":
                         obj = InputMessage.model_validate(message)
                         if obj.seq<=conn.seq:
                             raise ValueError("replayed input sequence")
@@ -264,6 +274,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             if now-conn.last_horn>=2:
                                 conn.last_horn = now
                                 app.state.rooms.broadcast(conn.room_code,{"type":"horn","player_id":conn.user_id})
+                        elif obj.type=="spawn":
+                            if not isinstance(room, CityRoom):
+                                raise ValueError("City room required")
+                            if not room.spawn(conn.user_id):
+                                conn.send({"type":"error","detail":"Подожди пару секунд перед новым рейсом"})
                 except HTTPException as exc:
                     conn.send({"type":"error","detail":exc.detail})
                 except (ValidationError,ValueError,TypeError):

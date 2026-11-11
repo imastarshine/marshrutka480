@@ -195,6 +195,7 @@ class GameRender extends GameUpdate {
         this.drawMotorcade();
         if (this.police) this.police.draw(this.frame);
         for (const i of this.inters) i.drawLights(this.frame);
+        window.citySession?.drawPlayers(this);
         for (const p of this.particles) if (p.world) p.draw();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx = screenCtx;
@@ -266,7 +267,7 @@ class GameRender extends GameUpdate {
     }
 
     drawMinimap() {
-        const size = 120, bx = 6, by = HEIGHT - size - 26;
+        const size = window.citySession?.active ? 154 : 120, bx = 6, by = HEIGHT - size - 26;
         fillRect(bx, by, size, size, [15, 20, 25], 0.82);
         const scale = 40 / BLOCK, cx = bx + size / 2, cy = by + size / 2;
         const toMap = (x, y) => [cx + (x - this.wx) * scale, cy + (y - this.wy) * scale];
@@ -308,6 +309,7 @@ class GameRender extends GameUpdate {
             const [px, py] = toMap(...this.screenToWorld(this.police.y));
             circle(px, py, 4, [255, 60, 60]);
         }
+        window.citySession?.drawMinimap(this, {bx,by,size,toMap,cx,cy});
         const [dx, dy] = this.dir;
         poly([[cx + dx * 8, cy + dy * 8], [cx - dx * 5 - dy * 5, cy - dy * 5 + dx * 5],
             [cx - dx * 5 + dy * 5, cy - dy * 5 - dx * 5]], YELLOW);

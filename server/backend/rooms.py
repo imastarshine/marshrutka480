@@ -12,6 +12,7 @@ from fastapi import HTTPException, WebSocket
 from .config import Settings
 from .database import Database
 from .simulation import Room
+from .city import CityRoom
 
 logger = logging.getLogger("marshrutka.rooms")
 
@@ -39,13 +40,13 @@ class RoomManager:
     def __init__(self, settings: Settings, db: Database) -> None:
         self.settings = settings
         self.db = db
-        self.rooms: dict[str,Room] = {}
+        self.rooms: dict[str,Room | CityRoom] = {}
         self.memberships: dict[int,str] = {}
         self.connections: dict[int,Connection] = {}
         self.task: asyncio.Task | None = None
         self.closed = False
 
-    def create(self, user: dict, name: str, public: bool, max_players: int) -> Room:
+    def create(self, user: dict, name: str, public: bool, max_players: int, mode: str = "arcade") -> Room | CityRoom:
         if user["id"] in self.memberships:
             raise HTTPException(409,"Сначала покиньте текущую комнату")
         if len(self.rooms) >= self.settings.max_rooms:
@@ -54,7 +55,8 @@ class RoomManager:
         code = "".join(secrets.choice(alphabet) for _ in range(6))
         while code in self.rooms:
             code = "".join(secrets.choice(alphabet) for _ in range(6))
-        room = Room(code,name,public,max_players,user["id"],self.settings)
+        room_type = CityRoom if mode == "city" else Room
+        room = room_type(code,name,public,max_players,user["id"],self.settings)
         room.add(user)
         self.rooms[code] = room
         self.memberships[user["id"]] = code
@@ -69,7 +71,7 @@ class RoomManager:
             raise HTTPException(409,"Сначала покиньте текущую комнату")
         if current == code:
             return room
-        if room.status not in {"waiting","finished"}:
+        if not isinstance(room, CityRoom) and room.status not in {"waiting","finished"}:
             raise HTTPException(409,"Рейс уже начался. Дождитесь окончания")
         if len([p for p in room.players.values() if not p.abandoned]) >= room.max_players:
             raise HTTPException(409,"В комнате нет свободных мест")
@@ -128,7 +130,9 @@ class RoomManager:
             if p:
                 p.connected = False
                 p.clear_input()
-                if room.status in {"running","countdown"}:
+                if isinstance(room, CityRoom):
+                    room.players.pop(user_id, None)
+                elif room.status in {"running","countdown"}:
                     p.abandoned = True
                 else:
                     room.players.pop(user_id,None)
@@ -157,6 +161,8 @@ class RoomManager:
             raise HTTPException(404,"Комната закрыта")
         if room.host_id != conn.user_id:
             raise HTTPException(403,"Рейс запускает владелец комнаты")
+        if isinstance(room, CityRoom):
+            return
         if room.status not in {"waiting","finished"}:
             raise HTTPException(409,"Рейс уже запущен")
         if room.status == "finished" and not room.persisted:

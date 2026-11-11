@@ -23,7 +23,7 @@ class Settings:
     max_connections: int = 128
     body_limit: int = 8192
     ws_limit: int = 2048
-    web_path: str = field(default_factory=lambda: str(Path(__file__).resolve().parents[1] / "web"))
+    web_path: str = field(default_factory=lambda: str(Path(__file__).resolve().parents[2] / "web"))
 
     def __post_init__(self) -> None:
         if self.environment not in {"development", "production"}:

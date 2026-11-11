@@ -1,15 +1,17 @@
 services:
   game:
-    build: .
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
     restart: unless-stopped
     env_file: .env
     environment:
-      M480_DATABASE: /app/data/marshrutka.sqlite3
+      M480_DATABASE: /app/server/data/marshrutka.sqlite3
       M480_PROXY_IPS: 172.29.48.1
     ports:
       - "${M480_BIND:-127.0.0.1}:${M480_PORT:-8000}:8000"
     volumes:
-      - game-data:/app/data
+      - game-data:/app/server/data
     networks:
       - game-local
     read_only: true
