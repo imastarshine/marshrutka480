@@ -21,10 +21,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from .assets import versioned_index
+from .bug_reports import BugReportStore
 from .config import Settings
 from .database import Database
 from .middleware import SecurityMiddleware
-from .models import ActionMessage, AuthMessage, CityPoseMessage, CreateRoom, Credentials, EmptyBody, InputMessage, PingMessage
+from .models import ActionMessage, AuthMessage, BugReport, CityPoseMessage, CreateRoom, Credentials, EmptyBody, InputMessage, PingMessage
 from .city import CityRoom
 from .traffic import load_graph
 from .rooms import Connection, PUBLIC_CITY_CODE, RoomManager
@@ -33,6 +34,7 @@ from .security import RateLimiter, bounded_thread_work, hash_password, token_has
 logger = logging.getLogger("marshrutka")
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{40,128}\Z")
 CODE_PATTERN = re.compile(r"[A-Z2-9]{6}\Z")
+SERVER_REVISION = "2.2.0-beta.4"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -43,6 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.settings = settings
         app.state.db = Database(settings.db_path)
+        app.state.bug_reports = await asyncio.to_thread(BugReportStore, settings.db_path)
         app.state.rooms = RoomManager(settings,app.state.db)
         app.state.manager = app.state.rooms
         app.state.store = app.state.db
@@ -110,7 +113,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok":True,"version":"2.2.0-beta.3","protocol":1,"features":["original-city","world-poses","irkutsk-routes","osm-road-geometry","public-city","guest-access","shared-traffic"]}
+        return {"ok":True,"version":SERVER_REVISION,"protocol":1,"features":["original-city","world-poses","irkutsk-routes","osm-road-geometry","public-city","guest-access","shared-traffic"]}
+
+    @app.post("/api/bug-reports", status_code=201)
+    async def bug_report(body: BugReport, user=Depends(identity)):
+        # Guest sessions use the same authenticated identity as registered users.
+        rate("bug-report:" + str(user["id"]), 1, 10)
+        manager = app.state.rooms
+        room_code = manager.memberships.get(user["id"])
+        room = manager.rooms.get(room_code)
+        player = room.players.get(user["id"]) if isinstance(room, CityRoom) else None
+        pose = dict(player.pose) if player and player.pose else None
+        record_id = await asyncio.to_thread(
+            app.state.bug_reports.add, user["id"], body.model_dump(exclude_none=True),
+            revision=SERVER_REVISION, room=room_code, server_pose=pose)
+        logger.warning("bug_report id=%s route=%s edge=%s wx=%.3f wy=%.3f",
+                       record_id, body.route, body.edge, body.wx, body.wy)
+        return {"id": record_id}
 
     @app.post("/api/auth/guest", status_code=201)
     async def guest(body: EmptyBody, request: Request):

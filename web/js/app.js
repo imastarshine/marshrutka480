@@ -8,6 +8,8 @@ class MarshrutkaApp {
         this.reconnectTimer=null;this.reconnectDeadline=0;this.reconnectAttempt=0;
         this.connectionVersion=0;this.roomRequest=false;this.lastHorn=0;this.lastRoster="";
         this.remoteHornAt=new Map();
+        this.bugReports=[];this.bugReportBusy=false;this.lastBugSend=0;
+        try{const saved=JSON.parse(localStorage.getItem("m480.bug-outbox.v1")||"[]");if(Array.isArray(saved))this.bugReports=saved.slice(-20);}catch(_){}
         this.pendingCode=null;this.toastTimer=null;this.base="";
         this.publicWanted=false;this.publicJoining=false;this.cityCount=null;this.intent=0;
         this.restoreTask=null;this.sessionKey="m480.auth.session";this.spawnRetryAt=0;
@@ -22,6 +24,7 @@ class MarshrutkaApp {
         setInterval(()=>{this.refreshChrome();this.renderRoster();},500);
         setInterval(()=>{if(this.panelView==="friends"&&!this.room&&this.healthy)this.loadRooms();},15000);
         setInterval(()=>{if(this.healthy&&!this.room?.shared)this.loadPublicCity();},15000);
+        setInterval(()=>{if(this.bugReports.length)void this.flushBugReports();},15000);
         const code=new URLSearchParams(location.search).get("room");
         if(code?.toUpperCase()==="IRKUTK")this.joinPublicCity();
         else if(code&&/^[A-Z2-9]{6}$/i.test(code)){this.pendingCode=code.toUpperCase();this.el("room-code").value=this.pendingCode;this.openPanel("friends");this.status("room-status","Приглашение открыто. Войди, чтобы присоединиться.");}
@@ -132,6 +135,34 @@ class MarshrutkaApp {
             if(error instanceof TypeError)throw Error("Нет связи с диспетчером. Свой рейс можно продолжить.");
             throw error;
         }finally{clearTimeout(timeout);}
+    }
+    saveBugOutbox(){
+        try{localStorage.setItem("m480.bug-outbox.v1",JSON.stringify(this.bugReports));return true;}catch(_){return false;}
+    }
+    async reportBug(report){
+        if(this.bugReports.length>=20){game.bugReportStatus="Восстановлено · очередь отчётов заполнена";return;}
+        this.bugReports.push(report);this.saveBugOutbox();
+        await this.flushBugReports();
+    }
+    async flushBugReports(){
+        if(this.bugReportBusy||!this.bugReports.length)return;
+        if(Date.now()-this.lastBugSend<10500){game.bugReportStatus="Восстановлено · отчёт ждёт отправки";return;}
+        this.bugReportBusy=true;this.lastBugSend=Date.now();
+        try{
+            if(!this.token&&!await this.restoreSession())this.saveSession(await this.api("/api/auth/guest",{method:"POST",body:{}}));
+            const result=await this.api("/api/bug-reports",{method:"POST",body:this.bugReports[0]});
+            this.bugReports.shift();this.saveBugOutbox();
+            game.bugReportStatus=`Отчёт сохранён на сервере · ${String(result.id).slice(0,8)}`;
+        }catch(error){
+            if(error.status===422){
+                const rejected=this.bugReports.shift();
+                try{const saved=JSON.parse(localStorage.getItem("m480.bug-rejected.v1")||"[]");
+                    saved.push(rejected);localStorage.setItem("m480.bug-rejected.v1",JSON.stringify(saved.slice(-5)));}catch(_){}
+                this.saveBugOutbox();
+            }
+            game.bugReportStatus=error.status===422?"Восстановлено · сервер отклонил отчёт, копия в браузере"
+                :"Восстановлено · отчёт отправится при восстановлении связи";
+        }finally{this.bugReportBusy=false;}
     }
     async health(){
         this.el("retry-server").hidden=true;

@@ -52,7 +52,7 @@ def main():
         way_id = edge["osmWayIds"][0]
         way_members.setdefault(way_id, []).append(index)
         edges.append([edge["id"], node_indices[edge["from"]], node_indices[edge["to"]], points,
-                      oneway, forward, backward, round(speed_mps, 3), car_allowed, way_id, name_indices[edge["street"]]])
+                      oneway, forward, backward, round(speed_mps, 3), car_allowed, way_id, name_indices[edge["street"]], edge.get("lanes", 2)])
     restrictions = []
     for relation in city.get("sourceRestrictions", []):
         tags = relation.get("tags", {})
@@ -68,7 +68,7 @@ def main():
             for to_way in to_ways:
                 restrictions.append([node_indices[f"osm-{via[0]}"], from_way, to_way,
                                      kind.startswith("only_"), kind in ("no_u_turn", "only_u_turn")])
-    output = {"version": 1, "metersPerUnit": city["metersPerUnit"], "nodes": nodes, "edges": edges,
+    output = {"version": 2, "metersPerUnit": city["metersPerUnit"], "nodes": nodes, "edges": edges,
               "streets": names, "restrictions": restrictions,
               "source": "OpenStreetMap", "license": "ODbL-1.0", "attribution": "© OpenStreetMap contributors"}
     args.output.parent.mkdir(parents=True, exist_ok=True)

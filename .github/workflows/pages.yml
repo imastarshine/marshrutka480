@@ -21,6 +21,7 @@ jobs:
         run: |
           mkdir _pages
           cp index.html _pages/
+          cp navigation.css _pages/
           cp -R js _pages/js
       - uses: actions/upload-pages-artifact@v3
         with:

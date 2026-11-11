@@ -161,6 +161,7 @@ class Game extends GameRender {
     }
 
     draw() {
+        this.updateNavigationPanel();
         if (this.state === "intro") {
             if (drawIntro(this)) this.state = "menu";
             return;
@@ -169,15 +170,12 @@ class Game extends GameRender {
             this.drawRouteOverview();
             return;
         }
-        if (this.state === "turning") this.drawTurning();
-        else {
-            ctx.save();
-            if (this.shake) {   // тряска мира
-                ctx.translate(randint(-this.shake, this.shake) / 2, randint(-this.shake, this.shake) / 2);
-            }
-            this.drawWorld();
-            ctx.restore();
+        ctx.save();
+        if (this.shake) {   // тряска мира
+            ctx.translate(randint(-this.shake, this.shake) / 2, randint(-this.shake, this.shake) / 2);
         }
+        this.drawWorld();
+        ctx.restore();
         if (this.state !== "menu") this.drawHud();
         if (this.flash) fillRect(0, 0, WIDTH, HEIGHT, [255, 255, 230], this.flash / 255);
 
@@ -205,7 +203,7 @@ class Game extends GameRender {
         } else if (this.state === "offer") {
             this.drawCenter("АВАРИЯ!", [
                 `Ремонт: ${this.repairCost} ₽  (за рейс заработано ${this.money} ₽)`,
-                "Заплатить и ехать дальше?",
+                "Баг? Бесплатное восстановление — кнопка под навигацией",
             ], RED);
             const [pay, quit] = this.offerRects();
             fillRect(pay.x, pay.y, pay.w, pay.h, [70, 190, 90], 1, 12);
@@ -281,7 +279,7 @@ class Game extends GameRender {
             this.showBanner("Отпустили. Смена продолжается", WHITE);
             this.state = "play";
         }
-        if (this.state === "play" || this.state === "boom" || this.state === "turning") this.update();
+        if (this.state === "play" || this.state === "boom") this.update();
         else {
             this.frame += 1;
             for (const p of this.particles) p.update(0);
@@ -296,7 +294,7 @@ class Game extends GameRender {
             if (!down) { this.exitKeysHeld[code] = false; return; }
             if (this.exitKeysHeld[code]) return;
             this.exitKeysHeld[code] = true;
-            if (!this.mapOverview && this.state === "play") this.cycleCityExit(code === "KeyQ" ? -1 : 1);
+            if (!this.mapOverview && this.state === "play") this.cycleNavigationExit(code === "KeyQ" ? -1 : 1);
             return;
         }
         if (code === "KeyM") {
@@ -354,10 +352,6 @@ class Game extends GameRender {
 
     onClick(x, y) {
         if (this.mapOverview) { this.toggleRouteMap(); return; }
-        if (this.state === "play" && hit(rect(x, y, 1, 1), this.exitSelectorRect()) && this.exitSelectorInfo().canCycle) {
-            this.cycleCityExit(1);
-            return;
-        }
         if (["play", "pause"].includes(this.state) && hit(rect(x, y, 1, 1), this.minimapRect())) {
             this.toggleRouteMap();
             return;

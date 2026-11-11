@@ -163,17 +163,11 @@ class CitySession {
             ctx.restore();this.drawnTraffic++;
         }
     }
-    captureTurn(g) { this.turnFrom = {wx:g.wx, wy:g.wy, lateral:g.bus.x-roadMiddle(), angle:Math.atan2(g.dir[0], -g.dir[1])}; }
     pose(g) {
-        let wx = g.wx, wy = g.wy, lateral=g.bus.x-roadMiddle(), angle = Math.atan2(g.dir[0], -g.dir[1]);
-        if (g.state === "turning" && this.turnFrom) {
-            const t = smooth(1-g.turnT/g.turnTotal);
-            wx = this.turnFrom.wx+(wx-this.turnFrom.wx)*t;
-            wy = this.turnFrom.wy+(wy-this.turnFrom.wy)*t;
-            const delta = Math.atan2(Math.sin(angle-this.turnFrom.angle), Math.cos(angle-this.turnFrom.angle));
-            angle = this.turnFrom.angle+delta*t;
-            lateral = this.turnFrom.lateral+(lateral-this.turnFrom.lateral)*t;
-        }
+        const wx=g.wx, wy=g.wy, lateral=g.bus.x-roadMiddle();
+        const before=g.cityGeometryAt(-35).position, ahead=g.cityGeometryAt(35).position;
+        const angle=Math.hypot(ahead[0]-before[0],ahead[1]-before[1])>.01
+            ?Math.atan2(ahead[0]-before[0],before[1]-ahead[1]):Math.atan2(g.dir[0],-g.dir[1]);
         return {wx,wy,lateral,angle:Math.atan2(Math.sin(angle),Math.cos(angle)),
             speed:g.state==="play"?g.bus.speed:0,jump:g.bus.z,door:g.bus.doorOpen,braking:g.bus.braking,
             bus:g.model.key,route:g.route.num,state:g.state,street:g.currentStreet().slice(0,60),edge:g.cityEdge.id};
@@ -186,7 +180,9 @@ class CitySession {
         const worldFrame = Math.floor((Date.now()+this.clockOffset)/1000*60);
         for (const inter of g.inters) {
             const [i,j] = g.node(inter.k);
-            inter.t = worldFrame + Math.floor(hash(i,j,this.state.seed)*CYCLE) + (g.vertical?0:GREEN_T+YELLOW_T);
+            const direction=inter.signalDirection||g.dir;
+            inter.t = worldFrame + Math.floor(hash(i,j,this.state.seed)*CYCLE) +
+                (Math.abs(direction[1])>=Math.abs(direction[0])?0:GREEN_T+YELLOW_T);
         }
     }
     color(p) {

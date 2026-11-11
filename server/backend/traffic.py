@@ -21,6 +21,8 @@ CELL = 4000.0
 VIEW_RADIUS = 2000.0
 LANE_WIDTH = 74.0
 CAR_WIDTH, CAR_LENGTH = 50.0, 92.0
+STOP_LINE_GAP, BUMPER_GAP = 34.0, 6.0
+LOOKAHEAD = 1200.0
 MAX_NPCS = 2048  # Simulation budget, independent from the player population.
 COLORS = ((200, 40, 40), (40, 90, 200), (30, 140, 60), (120, 120, 130),
           (230, 230, 230), (35, 35, 40), (150, 60, 160), (220, 120, 30))
@@ -49,6 +51,17 @@ class Edge:
     allowed: bool
     way: int
     street: int
+    base_lanes: int
+
+
+@dataclass(frozen=True, slots=True)
+class Junction:
+    node: int
+    controlled: bool
+    cross_width: float
+    stop_line: float
+    center_stop: float
+    vertical: bool
 
 
 class TrafficGraph:
@@ -60,15 +73,18 @@ class TrafficGraph:
         self.incident = defaultdict(set)
         self.cells = defaultdict(list)
         self.rules = defaultdict(list)
+        self.junctions = {}
+        self.turns = {}
         for via, from_way, to_way, only, uturn in document["restrictions"]:
             self.rules[(via, from_way)].append((to_way, only, uturn))
         for index, raw in enumerate(document["edges"]):
-            eid, start, end, points, oneway, forward, backward, limit, allowed, way, street = raw
+            eid, start, end, points, oneway, forward, backward, limit, allowed, way, street = raw[:11]
+            base_lanes = raw[11] if len(raw) > 11 else max(forward, backward) * 2
             distances = [0.0]
             for point in range(2, len(points), 2):
                 distances.append(distances[-1] + math.hypot(points[point] - points[point - 2], points[point + 1] - points[point - 1]))
             edge = Edge(eid, start, end, points, distances, distances[-1], oneway,
-                        forward, backward, limit / self.meters_per_unit, allowed, way, street)
+                        forward, backward, limit / self.meters_per_unit, allowed, way, street, base_lanes)
             self.edges.append(edge)
             self.incident[start].add(index)
             self.incident[end].add(index)
@@ -128,14 +144,38 @@ class TrafficGraph:
             return rule[0] == target and (not rule[2] or incoming == outgoing)
         return (not only or any(matches(rule) for rule in only)) and not any(matches(rule) for rule in rules if not rule[1])
 
-    def red(self, node, dx, dy, seed, world_frame):
+    def junction(self, index, reverse):
+        key = (index, reverse)
+        if key in self.junctions:
+            return self.junctions[key]
+        edge = self.edges[index]
+        node = self.end_node(index, reverse)
+        _, _, dx, dy = self.position(index, 0 if reverse else edge.length, reverse)
+        cross_lanes = 0
+        for neighbor in self.incident.get(node, ()):
+            if neighbor == index:
+                continue
+            other = self.edges[neighbor]
+            outward_reverse = other.end == node
+            _, _, tx, ty = self.position(neighbor, other.length if outward_reverse else 0, outward_reverse)
+            if abs(dx * ty - dy * tx) > .35:
+                cross_lanes = max(cross_lanes, other.base_lanes)
+        width = LANE_WIDTH * cross_lanes if cross_lanes else 148.0
+        controlled = len(self.incident.get(node, ())) >= 3 or bool(self.nodes[node][2])
+        junction = Junction(node, controlled, width, width / 2 + STOP_LINE_GAP,
+                            width / 2 + STOP_LINE_GAP + CAR_LENGTH / 2 + BUMPER_GAP,
+                            abs(dy) >= abs(dx))
+        self.junctions[key] = junction
+        return junction
+
+    def red(self, junction, seed, world_frame):
         # Same node indices, integer hash and 650-frame cycle as the browser.
         # The current arcade draws lights at branch intersections; source
         # signal tags are also retained for a future stricter signal renderer.
-        if len(self.incident.get(node, ())) < 3 and not self.nodes[node][2]:
+        if not junction.controlled:
             return False
-        phase = (world_frame + math.floor(_hash(node, node * 7, seed) * 650)
-                 + (0 if abs(dy) >= abs(dx) else 370)) % 650
+        phase = (world_frame + math.floor(_hash(junction.node, junction.node * 7, seed) * 650)
+                 + (0 if junction.vertical else 370)) % 650
         return phase >= 300
 
 
@@ -162,6 +202,9 @@ class NPC:
     braking: bool = False
     next_edge: tuple | None = None
     planned_edges: list = field(default_factory=list)
+    history_edges: list = field(default_factory=list)
+    lane_wait: float = 0.0
+    junction_clearance: float = 0.0
 
 
 class SharedTraffic:
@@ -225,7 +268,7 @@ class SharedTraffic:
         if not npc.planned_edges and npc.next_edge:
             npc.planned_edges.append(npc.next_edge)
         distance = remaining + sum(self.graph.edges[edge].length for edge, _ in npc.planned_edges)
-        while distance < 1200 and len(npc.planned_edges) < 24:
+        while distance < LOOKAHEAD and len(npc.planned_edges) < 24:
             previous = npc.planned_edges[-1] if npc.planned_edges else (npc.edge, npc.reverse)
             following = self._choose_from(*previous)
             if following is None:
@@ -233,6 +276,130 @@ class SharedTraffic:
             npc.planned_edges.append(following)
             distance += self.graph.edges[following[0]].length
         npc.next_edge = npc.planned_edges[0] if npc.planned_edges else None
+
+    def _approaches(self, npc, remaining):
+        """Approach endpoints measured along the planned road, including splits."""
+        incoming = (npc.edge, npc.reverse)
+        distance = remaining
+        yield incoming, distance, self.graph.junction(*incoming)
+        for following in npc.planned_edges:
+            distance += self.graph.edges[following[0]].length
+            if distance > LOOKAHEAD:
+                break
+            yield following, distance, self.graph.junction(*following)
+
+    def _turn(self, incoming, outgoing):
+        graph = self.graph
+        key = (*incoming, *outgoing)
+        if key in graph.turns:
+            return graph.turns[key]
+        edge = graph.edges[incoming[0]]
+        other = graph.edges[outgoing[0]]
+        _, _, dx, dy = graph.position(incoming[0], 0 if incoming[1] else edge.length, incoming[1])
+        _, _, tx, ty = graph.position(outgoing[0], other.length if outgoing[1] else 0, outgoing[1])
+        angle = math.atan2(dx * ty - dy * tx, dx * tx + dy * ty)
+        # A bend of the same physical road has no lane-changing instruction.
+        if incoming[0] != outgoing[0] and len(graph.incident[graph.end_node(*incoming)]) < 3:
+            turn = 0
+        elif abs(angle) > math.radians(150):
+            turn = -1
+        else:
+            turn = 1 if angle > math.radians(30) else -1 if angle < -math.radians(30) else 0
+        graph.turns[key] = turn
+        return turn
+
+    def _exit_lane(self, lane, incoming, outgoing):
+        count = self.graph.lanes(*outgoing)
+        turn = self._turn(incoming, outgoing)
+        return count - 1 if turn > 0 else 0 if turn < 0 else min(lane, count - 1)
+
+    def _lane_intent(self, npc, remaining):
+        """Merge on the approach, never towards the width of the road AFTER a turn."""
+        graph = self.graph
+        incoming = (npc.edge, npc.reverse)
+        distance = remaining
+        approach_lanes = graph.lanes(*incoming)
+        for following in npc.planned_edges:
+            if distance >= LOOKAHEAD:
+                break
+            turn = self._turn(incoming, following)
+            if turn:
+                desired = min(graph.lanes(npc.edge, npc.reverse), approach_lanes) - 1 if turn > 0 else 0
+                return desired, distance - graph.junction(*incoming).center_stop
+            next_lanes = graph.lanes(*following)
+            if npc.lane >= next_lanes:
+                return next_lanes - 1, distance - 200.0
+            approach_lanes = next_lanes
+            distance += graph.edges[following[0]].length
+            incoming = following
+        return min(npc.lane, graph.lanes(npc.edge, npc.reverse) - 1), math.inf
+
+    def _compatible_exit(self, npc, remaining):
+        """An NPC has no assigned destination: abandon an impossible merge.
+
+        Two adjacent stopped cars must not wait forever to exchange lanes.
+        Replan only through a legal exit reachable from the occupied lane;
+        never move sideways through the other car or change this NPC's id.
+        """
+        graph = self.graph
+        incoming = (npc.edge, npc.reverse)
+        distance = remaining
+        for index, following in enumerate(npc.planned_edges):
+            if distance >= LOOKAHEAD:
+                break
+            if self._turn(incoming, following):
+                node = graph.end_node(*incoming)
+                count = graph.lanes(*incoming)
+                compatible = []
+                for outgoing in graph.adjacent.get(node, ()):
+                    if outgoing[0] == incoming[0] or not graph.can_turn(incoming[0], node, outgoing[0]):
+                        continue
+                    turn = self._turn(incoming, outgoing)
+                    if turn == 0 or turn > 0 and npc.lane == count - 1 or turn < 0 and npc.lane == 0:
+                        compatible.append(outgoing)
+                if not compatible:
+                    return False
+                straight = [option for option in compatible if self._turn(incoming, option) == 0]
+                replacement = self.random.choice(straight or compatible)
+                if replacement == following:
+                    return False
+                npc.planned_edges = npc.planned_edges[:index] + [replacement]
+                npc.next_edge = npc.planned_edges[0]
+                return True
+            distance += graph.edges[following[0]].length
+            incoming = following
+        return False
+
+    def _lane_clear(self, npc, lane, groups, remaining):
+        """A source-way split must not hide the car immediately ahead or behind."""
+        graph = self.graph
+        progress = graph.edges[npc.edge].length - remaining
+        clearance = CAR_LENGTH + 110.0
+        for other_progress, other in groups.get((npc.edge, npc.reverse, lane), ()):
+            if other.id != npc.id and abs(other_progress - progress) < clearance:
+                return False
+        distance = remaining
+        incoming = (npc.edge, npc.reverse)
+        future_lane = lane
+        for following in npc.planned_edges:
+            if distance >= clearance:
+                break
+            future_lane = self._exit_lane(future_lane, incoming, following)
+            for other_progress, other in groups.get((*following, future_lane), ()):
+                if other.id != npc.id and distance + other_progress < clearance:
+                    return False
+            distance += graph.edges[following[0]].length
+            incoming = following
+        distance = progress
+        for previous in reversed(npc.history_edges):
+            if distance >= clearance or lane >= graph.lanes(*previous):
+                break
+            previous_length = graph.edges[previous[0]].length
+            for other_progress, other in groups.get((*previous, lane), ()):
+                if other.id != npc.id and distance + previous_length - other_progress < clearance:
+                    return False
+            distance += previous_length
+        return True
 
     def _pose(self, npc):
         x, y, dx, dy = self.graph.position(npc.edge, npc.offset, npc.reverse)
@@ -263,15 +430,25 @@ class SharedTraffic:
                 continue
             if any(abs(previous - offset) < 240 for previous in self._occupancy[(edge_id, reverse, lane)]):
                 continue
-            self._next_id += 1
             cruise = min(edge.limit * self.random.uniform(.68, .9), 16 / self.graph.meters_per_unit)
-            npc = NPC(f"n{self.seed:x}-{self._next_id:x}", edge_id, reverse, offset, lane,
+            npc = NPC(f"n{self.seed:x}-{self._next_id + 1:x}", edge_id, reverse, offset, lane,
                       cruise * .7, cruise, self.random.choice(COLORS), self.elapsed,
                       lateral=LANE_WIDTH * (lane + .5))
-            npc.next_edge = self._choose_exit(npc)
+            remaining = offset if reverse else edge.length - offset
+            self._plan_ahead(npc, remaining)
+            # Do not introduce a moving car inside an upstream stop-line on
+            # either the current source way or a very short following way.
+            if any(junction.controlled and distance < junction.center_stop + CAR_LENGTH
+                   for _, distance, junction in self._approaches(npc, remaining)):
+                continue
+            npc.lane, _ = self._lane_intent(npc, remaining)
+            npc.lateral = LANE_WIDTH * (npc.lane + .5)
+            if any(abs(previous - offset) < 240 for previous in self._occupancy[(edge_id, reverse, npc.lane)]):
+                continue
+            self._next_id += 1
             self.npcs[npc.id] = npc
             counts[cell] += 1
-            self._occupancy[(edge_id, reverse, lane)].append(offset)
+            self._occupancy[(edge_id, reverse, npc.lane)].append(offset)
             return True
         return False
 
@@ -323,10 +500,8 @@ class SharedTraffic:
                 if abs(npc.lateral - LANE_WIDTH * (lane + .5)) < 62:
                     groups[(npc.edge, npc.reverse, lane)].append((progress, npc))
         leaders = {}
-        first_in_lane = {}
         for key, group in groups.items():
             group.sort(key=lambda item: item[0])
-            first_in_lane[key] = group[0]
             for index in range(len(group) - 1):
                 npc_id = group[index][1].id
                 if npc_id not in leaders or group[index + 1][0] < leaders[npc_id][0]:
@@ -348,15 +523,21 @@ class SharedTraffic:
             edge = self.graph.edges[npc.edge]
             remaining = npc.offset if npc.reverse else edge.length - npc.offset
             self._plan_ahead(npc, remaining)
-            target_lateral = LANE_WIDTH * (npc.lane + .5)
-            distance_ahead = remaining
-            for next_id, next_reverse in npc.planned_edges:
-                if distance_ahead >= 1200:
-                    break
-                next_lane = min(npc.lane, self.graph.lanes(next_id, next_reverse) - 1)
-                target_lateral = min(target_lateral, LANE_WIDTH * (next_lane + .5))
-                distance_ahead += self.graph.edges[next_id].length
-            npc.lateral += max(-80 * dt, min(80 * dt, target_lateral - npc.lateral))
+            desired_lane, lane_room = self._lane_intent(npc, remaining)
+            merge_lane = npc.lane + (1 if desired_lane > npc.lane else -1 if desired_lane < npc.lane else 0)
+            lane_clear = merge_lane == npc.lane or self._lane_clear(npc, merge_lane, groups, remaining)
+            npc.lane_wait = npc.lane_wait + dt if not lane_clear and lane_room < 250 and npc.speed < 30 else 0.0
+            if npc.lane_wait >= 5.0 and self._compatible_exit(npc, remaining):
+                npc.lane_wait = 0.0
+                self._plan_ahead(npc, remaining)
+                desired_lane, lane_room = self._lane_intent(npc, remaining)
+                merge_lane = npc.lane + (1 if desired_lane > npc.lane else -1 if desired_lane < npc.lane else 0)
+                lane_clear = merge_lane == npc.lane or self._lane_clear(npc, merge_lane, groups, remaining)
+            target_lateral = LANE_WIDTH * (merge_lane + .5)
+            if lane_clear:
+                npc.lateral += max(-80 * dt, min(80 * dt, target_lateral - npc.lateral))
+                if abs(npc.lateral - target_lateral) < .01:
+                    npc.lane = merge_lane
             x, y, dx, dy = self.graph.position(npc.edge, npc.offset, npc.reverse)
             if self._cell(x, y) in self._active_cells:
                 npc.last_active = self.elapsed
@@ -371,25 +552,49 @@ class SharedTraffic:
                 gap = leader[0] - progress - CAR_LENGTH
                 target = min(target, max(0, leader[1].speed + (gap - 160) * 1.2))
                 max_move = max(0, gap - 45)
-            if npc.next_edge is None:
-                npc.next_edge = self._choose_exit(npc)
-            if npc.next_edge:
-                next_id, next_reverse = npc.next_edge
-                physical_lane = max(0, round(npc.lateral / LANE_WIDTH - .5))
-                next_lane = min(physical_lane, self.graph.lanes(next_id, next_reverse) - 1)
-                next_leader = first_in_lane.get((next_id, next_reverse, next_lane))
-                if next_leader:
-                    gap = remaining + next_leader[0] - CAR_LENGTH
-                    target = min(target, max(0, next_leader[1].speed + (gap - 160) * 1.2))
-                    max_move = min(max_move, max(0, gap - 45))
-            else:
-                target = min(target, math.sqrt(2 * braking * max(0, remaining - 70)))
-                max_move = min(max_move, max(0, remaining - 70))
-            node = self.graph.end_node(npc.edge, npc.reverse)
-            if self.graph.red(node, dx, dy, self.seed, world_frame) and remaining > 55:
-                room = max(0, remaining - 70)
+            # Follow the physical queue over all short OSM edges. A planned
+            # loop can revisit this car's own edge: it must never lead itself.
+            distance_ahead = remaining
+            incoming = (npc.edge, npc.reverse)
+            future_lanes = {lane for lane in range(self.graph.lanes(*incoming))
+                            if abs(npc.lateral - LANE_WIDTH * (lane + .5)) < 62}
+            for following in npc.planned_edges:
+                if distance_ahead > LOOKAHEAD:
+                    break
+                future_lanes = {self._exit_lane(lane, incoming, following) for lane in future_lanes}
+                for lane in future_lanes:
+                    next_leader = next((item for item in groups.get((*following, lane), ()) if item[1].id != npc.id), None)
+                    if next_leader:
+                        gap = distance_ahead + next_leader[0] - CAR_LENGTH
+                        target = min(target, max(0, next_leader[1].speed + (gap - 160) * 1.2))
+                        max_move = min(max_move, max(0, gap - 45))
+                distance_ahead += self.graph.edges[following[0]].length
+                incoming = following
+            if not npc.next_edge:
+                room = max(0, remaining - CAR_LENGTH / 2 - BUMPER_GAP)
                 target = min(target, math.sqrt(2 * braking * room))
                 max_move = min(max_move, room)
+            # A turn starts only after the approach lane is reached. If that
+            # lane is occupied, wait before the line instead of crossing rows.
+            if abs(npc.lateral - LANE_WIDTH * (desired_lane + .5)) > 1:
+                room = max(0, lane_room)
+                target = min(target, math.sqrt(2 * braking * room))
+                max_move = min(max_move, room)
+            current_junction = self.graph.junction(npc.edge, npc.reverse)
+            if current_junction.controlled and remaining < current_junction.center_stop - .01:
+                # Keep clearing the same physical intersection after crossing
+                # a tiny source edge. Another OSM control node inside its road
+                # width must not stop the car in the middle on a different phase.
+                npc.junction_clearance = max(npc.junction_clearance,
+                                             remaining + current_junction.cross_width / 2 + CAR_LENGTH / 2)
+            for _, distance_ahead, junction in self._approaches(npc, remaining):
+                room = distance_ahead - junction.center_stop
+                # Once the front has crossed a line, clear that junction even
+                # if its light changes. At the stopping boundary keep waiting.
+                if room >= -.01 and not (npc.junction_clearance > 0 and room < npc.junction_clearance) and self.graph.red(junction, self.seed, world_frame):
+                    room = max(0, room)
+                    target = min(target, math.sqrt(2 * braking * room))
+                    max_move = min(max_move, room)
             lateral = npc.lateral
             px, py = x - dy * lateral, y + dx * lateral
             bx, by = math.floor(px / 800), math.floor(py / 800)
@@ -411,6 +616,7 @@ class SharedTraffic:
             distance = min(npc.speed * dt, max_move)
             if distance < npc.speed * dt:
                 npc.speed = distance / dt if dt else 0
+            travel_budget = distance
             transitions = 0
             while distance > 0 and transitions < 32:
                 edge = self.graph.edges[npc.edge]
@@ -423,14 +629,27 @@ class SharedTraffic:
                 if not npc.next_edge:
                     npc.speed = 0
                     break
-                npc.edge, npc.reverse = npc.next_edge
+                previous_edge = (npc.edge, npc.reverse)
+                following = npc.next_edge
+                turn = self._turn(previous_edge, following)
+                npc.lane = self._exit_lane(npc.lane, previous_edge, following)
+                npc.history_edges.append(previous_edge)
+                npc.history_edges = npc.history_edges[-24:]
+                npc.edge, npc.reverse = following
                 if npc.planned_edges and npc.planned_edges[0] == npc.next_edge:
                     npc.planned_edges.pop(0)
                 edge = self.graph.edges[npc.edge]
                 npc.offset = edge.length if npc.reverse else 0.0
-                npc.lane = min(npc.lane, self.graph.lanes(npc.edge, npc.reverse) - 1)
+                # The beta wire format has no turning arc: align the outgoing
+                # lane after a real turn. Technical source-way splits must
+                # preserve a merge in progress instead of resetting it.
+                if turn:
+                    npc.lateral = LANE_WIDTH * (npc.lane + .5)
+                else:
+                    npc.lateral = min(npc.lateral, LANE_WIDTH * (self.graph.lanes(npc.edge, npc.reverse) - .5))
                 npc.next_edge = npc.planned_edges[0] if npc.planned_edges else self._choose_exit(npc)
                 transitions += 1
+            npc.junction_clearance = max(0.0, npc.junction_clearance - (travel_budget - distance))
         for npc_id in remove:
             self.npcs.pop(npc_id, None)
         self._snapshot_cells.clear()

@@ -23,9 +23,16 @@ PYTHONDONTWRITEBYTECODE=1
 ```
 
 6. Установи `deploy/marshrutka.service` в `/etc/systemd/system/`.
+
 7. Выполни `systemctl daemon-reload` и `systemctl enable --now marshrutka`.
 8. Настрой nginx или Caddy на HTTPS с проксированием `/api/*` и `/ws`
    на `127.0.0.1:8000`. Примеры находятся в `deploy/`.
+
+Кнопка «Произошёл баг» сохраняет диагностические отчёты в `bug-reports.sqlite3`
+рядом с `M480_DATABASE`. Таблица `bug_reports` содержит ID, время, ID игрока и
+`record_json` с координатами, версией, дорогой, ближайшими NPC и светофорами.
+В журнале `marshrutka.service` доступны строки `bug_report id=...`.
+Пароли, токены, IP и содержимое браузерного хранилища в отчёты не записываются.
 
 Замени `game.example.com` настоящим доменом или IP с доверенным TLS-сертификатом.
 Origin содержит схему и хост, без пути и завершающего `/`.

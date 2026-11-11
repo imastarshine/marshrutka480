@@ -61,6 +61,8 @@ input,select{border:1px solid #4b5b42;border-radius:5px;background:#182119;color
   .topbar{position:absolute;inset:0 0 auto;height:0;padding:0;border:0;background:none;pointer-events:none}
   .brand{position:absolute;top:24px;left:24px;pointer-events:auto}
   .main-nav{position:absolute;top:112px;left:24px;width:max(150px,calc(var(--side) - 48px));height:auto;flex-direction:column;gap:8px;pointer-events:auto}
+  .navigation-dock{position:absolute;top:292px;left:24px;width:max(150px,calc(var(--side) - 48px));max-width:360px;z-index:4;flex-wrap:wrap;border:1px solid #455343;border-radius:6px}
+  .navigation-dock .navigation-info{flex-basis:140px}.navigation-dock .navigation-actions{margin-left:auto}
   .nav-button{text-align:left;height:44px;border:1px solid transparent;border-radius:5px;padding:0 14px}
   .nav-button.active,.nav-button:hover{border-color:#f5cc4c35;background:#f5cc4c0d}
   .header-actions{position:absolute;top:28px;right:24px;pointer-events:auto}
@@ -76,6 +78,7 @@ input,select{border:1px solid #4b5b42;border-radius:5px;background:#182119;color
   html,body{height:auto;min-height:100%;overflow-x:hidden;overflow-y:auto}
   .topbar{position:sticky;top:0;z-index:15}.game-layout,.touch .game-layout{height:auto;display:block;padding-bottom:0}
   .game-area{container-type:normal;display:block;width:100%;height:auto;overflow:hidden}
+  .navigation-dock{position:relative;width:100%;max-width:760px;margin:auto}
   .game-frame{width:100%;height:auto;max-width:760px;aspect-ratio:640/760;margin:auto;scroll-margin-top:var(--header)}
   canvas{width:100%;height:auto;aspect-ratio:640/760}
   .game-layout .controls,.touch .game-layout .controls{position:relative;inset:auto;display:flex;width:100%;max-width:760px;margin:auto;height:78px;padding:10px 12px;align-items:center;justify-content:space-between;background:#1b251c;border-top:1px solid #45543b;pointer-events:auto}
@@ -85,6 +88,10 @@ input,select{border:1px solid #4b5b42;border-radius:5px;background:#182119;color
   .dispatch-panel{position:relative;inset:auto;display:block;width:100%;max-width:760px;margin:auto;border:0;border-top:1px solid #536147;box-shadow:none;scroll-margin-top:var(--header)}
   .panel-heading{padding:24px}.panel-body{overflow:visible;padding:22px 24px}.panel-footer{padding:17px 24px}.panel-scrim{display:none!important}
   .toast,.touch .toast{bottom:20px}.crew-strip{right:10px;top:10px;max-width:140px}
+}
+
+@media(min-width:1180px) and (aspect-ratio > 4/3) and (max-height:480px){
+  .brand{top:12px}.main-nav{top:76px;gap:3px}.nav-button{height:28px}.navigation-dock{top:178px}
 }
 
 .map-attribution{position:fixed;bottom:3px;right:5px;z-index:20;padding:2px 4px;background:#151a18d9;color:#b6c1b6;font:10px Arial,sans-serif;pointer-events:auto}

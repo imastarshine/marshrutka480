@@ -82,7 +82,7 @@ class GameUpdate extends GameCore {
                 if (d > 0 && oy > car.y) consider(oy - (car.y + CAR_H), os);
             }
             for (const inter of this.inters) {
-                const st = inter.state, stop = st !== "green";
+                const st = inter.state, stop = inter.hasSignal !== false && st !== "green";
                 if (d < 0) {
                     const gap = car.y - inter.stopLine;
                     if (gap < 160 && (inter.peds.blocks(car.x) || (stop && !(st === "yellow" && gap < 40)))) consider(gap, 0);
@@ -318,7 +318,7 @@ class GameUpdate extends GameCore {
             this.checkPeds(inter.peds, inter.zebraTop);
             if (!inter.passed && bus.y < inter.stopLine && !bus.air) {
                 inter.passed = true;
-                if (inter.state === "red" && bus.speed > 0) {
+                if (inter.hasSignal !== false && inter.state === "red" && bus.speed > 0) {
                     // награда за дерзость — только пока не в розыске
                     if (!this.stars) this.stunt("Проскочил на красный!", 40);
                     this.startChase("проезд на красный", 0.55);
@@ -571,8 +571,10 @@ class GameUpdate extends GameCore {
         return [cx, cy];
     }
 
-    crash(r, car = null) {
+    crash(r, car = null, collisionId = null) {
         const bus = this.bus;
+        this.lastCollision = { id: collisionId || (car ? "local-traffic" : "road-obstacle"),
+            time: Date.now(), airbag: this.airbags > 0, repPenalty: this.airbags > 0 ? 0 : 3 };
         if (this.airbags > 0) {                // подушка: спасает один раз
             this.airbags -= 1;
             this.explode(r, false);
@@ -689,7 +691,7 @@ class GameUpdate extends GameCore {
         for (const car of this.serverCars || []) {
             const body = rect(car.x - car.w / 2 + 3, car.y - car.h / 2 + 3, car.w - 6, car.h - 6);
             if (car.collidable && car.alpha > 0.25 && hit(hb, car.rect) && rotatedHit(hb, this.bendAngle(), body, car.angle)) {
-                this.crash(car.rect);
+                this.crash(car.rect, null, car.id);
                 return;
             }
         }
@@ -722,6 +724,94 @@ class GameUpdate extends GameCore {
         return REPAIR_COST * (this.repairs + 1);
     }
 
+    captureBugReport() {
+        const session = window.citySession, bus = this.bus;
+        const finite = (value, fallback = 0) => Number.isFinite(value) ? value : fallback;
+        const nearby = session?.traffic ? session.traffic().filter((npc) =>
+            Number.isFinite(npc.wx) && Number.isFinite(npc.wy)).sort((a, b) =>
+            Math.hypot(a.wx - this.wx, a.wy - this.wy) - Math.hypot(b.wx - this.wx, b.wy - this.wy)).slice(0, 20) : [];
+        return { version: GAME_VERSION, route: this.route.num, edge: this.cityEdge.id,
+            reverse: this.cityReverse, wx: this.wx, wy: this.wy, offset: this.cityOffset,
+            lateral: clamp(finite(bus.x - roadMiddle()), -500, 500), angle: Math.atan2(this.dir[0], -this.dir[1]),
+            speed: clamp(finite(bus.speed), -4, 19), state: this.state,
+            collision_id: this.lastCollision?.id || null,
+            nearby_npcs: nearby.map((npc) => ({ id: npc.id, edge: npc.edge, reverse: Boolean(npc.reverse),
+                wx: npc.wx, wy: npc.wy, speed: clamp(npc.speed || 0, -4, 19) })),
+            signals: [...this.inters].filter((inter) => inter.hasSignal !== false && Number.isFinite(inter.y)).sort((a, b) =>
+                Math.abs(a.y - bus.centerY) - Math.abs(b.y - bus.centerY)).slice(0, 12).map((inter) => ({
+                    node: String(inter.k), state: inter.state, distance: bus.centerY - inter.y - inter.h / 2 })) };
+    }
+
+    recoverFromBug() {
+        if (!["play", "boom", "offer"].includes(this.state) && !(this.state === "over" && this.result?.how === "crash")) return false;
+        const now = Date.now();
+        if (now - (this.lastBugRecoveryAt || 0) < 1000) return false;
+        this.lastBugRecoveryAt = now;
+        if (!this.cityGraph.edges.has(this.cityEdge?.id) ||
+            ![this.cityOffset, this.wx, this.wy, this.cityTravel].every(Number.isFinite)) {
+            const saved = this.lastGoodRoadPose, first = this.cityItinerary.legs[0];
+            this.cityEdge = this.cityGraph.edges.get(saved?.edge) || first.edge;
+            this.cityReverse = saved?.reverse ?? first.reverse;
+            this.cityOffset = clamp(Number.isFinite(saved?.offset) ? saved.offset : 0, 0, this.cityEdge.length);
+            this.cityTravel = Number.isFinite(saved?.travel) ? saved.travel : 0;
+            [this.wx, this.wy] = this.cityGraph.position(this.cityEdge, this.cityOffset);
+            this.dir = this.cityGraph.direction(this.cityEdge, this.cityReverse, this.cityOffset);
+            this.cityGeometryCache = null; this.cityNavigationCache = null;
+        }
+        this.dir = this.cityGraph.direction(this.cityEdge, this.cityReverse, this.cityOffset);
+        const report = this.captureBugReport(), bus = this.bus;
+        if (this.state === "over" && this.finishedCrashSave) {
+            Object.assign(this.save, this.finishedCrashSave);
+            writeSave(this.save);
+        }
+        if (this.lastCollision) {
+            this.airbags += this.lastCollision.airbag ? 1 : 0;
+            this.repDelta += this.lastCollision.repPenalty;
+        }
+        // Recover on this same connected road. Never reset the shift or remove
+        // shared NPCs for other players; look for room and grant temporary cover.
+        const actors = window.citySession?.traffic?.() || [];
+        const edge = this.cityEdge, direction = this.cityReverse ? -1 : 1;
+        let best = null;
+        for (const delta of [0, -180, 180, -360, 360, 600]) {
+            const offset = clamp(this.cityOffset + direction * delta, 0, edge.length);
+            const [x, y] = this.cityGraph.position(edge, offset), dir = this.cityGraph.direction(edge, this.cityReverse, offset);
+            const ahead = (offset - this.cityOffset) * direction;
+            const open = Math.min(this.openAt(bus.centerY - ahead - bus.h / 2), this.openAt(bus.centerY - ahead + bus.h / 2));
+            for (let lane = 0; lane < Math.max(1, Math.floor(open + 0.05)); lane++) {
+                const lateral = LANE_W * (lane + 0.5), px = x - dir[1] * lateral, py = y + dir[0] * lateral;
+                const gap = actors.length ? Math.min(...actors.map((npc) => Math.hypot(
+                    npc.wx + Math.cos(npc.angle) * (npc.lateral || 0) - px,
+                    npc.wy + Math.sin(npc.angle) * (npc.lateral || 0) - py))) : 1000;
+                const score = Math.min(gap, 400) - Math.abs(delta) * 0.1;
+                if (!best || score > best.score) best = { offset, lateral, x, y, dir, score };
+            }
+        }
+        const travel = (best.offset - this.cityOffset) * direction;
+        this.cityOffset = best.offset; this.cityTravel += travel; this.scroll += travel;
+        this.wx = best.x; this.wy = best.y; this.dir = best.dir;
+        this.cameraDir = [...this.dir];
+        this.cityGeometryCache = null; this.cityNavigationCache = null;
+        bus.x = roadMiddle() + best.lateral; bus.speed = 0; bus.vx = 0;
+        bus.air = 0; bus.airTotal = 0; bus.landing = 0; bus.invuln = 360;
+        bus.doorOpen = 0; this.boomTimer = 0; this.shake = 0; this.flash = 0;
+        this.state = "play"; this.result = null; this.finishedCrashSave = null; this.lastCollision = null;
+        this.particles = []; this.repPopup = null; this.keys = { up: false, down: false, left: false, right: false };
+        if (window.citySession?.active) window.citySession.pendingSpawn = true;
+        this.showBanner("Бесплатное восстановление · 6 секунд защиты", GREEN, 240);
+        this.bugReportStatus = "Восстановлено. Отправляем отчёт…";
+        if (window.app?.reportBug) {
+            void window.app.reportBug(report);
+        } else {
+            try {
+                const queue = JSON.parse(localStorage.getItem("m480.bug-outbox.v1") || "[]");
+                queue.push(report); localStorage.setItem("m480.bug-outbox.v1", JSON.stringify(queue.slice(-20)));
+                this.bugReportStatus = "Отчёт сохранён в браузере · сервер не подключён";
+            } catch (_) { this.bugReportStatus = "Восстановлено · сохранить отчёт не удалось"; }
+        }
+        return true;
+    }
+
     // после ДТП: заплатить за ремонт из денег рейса и ехать дальше
     payRepair() {
         if (this.state !== "offer" || this.money < this.repairCost) return;
@@ -737,6 +827,7 @@ class GameUpdate extends GameCore {
     }
 
     finish(how) {
+        if (how === "crash") this.finishedCrashSave = { wallet: this.save.wallet, rep: this.save.rep, best: this.save.best };
         if (how === "shift" && this.storyFlags) {          // глава «отработай смену»
             this.storyFlags.shiftDone = true;
             storyCheck(this);
@@ -761,12 +852,7 @@ class GameUpdate extends GameCore {
 
     update() {
         this.frame += 1;
-        if (this.state === "turning") {
-            this.turnT -= 1;
-            this.updateEffects();
-            if (this.turnT <= 0) this.state = "play";
-            return;
-        }
+        if (this.state === "turning") this.state = "play";
         if (this.state === "boom") {
             this.bus.speed = 0;
             this.updateEffects();
@@ -775,10 +861,7 @@ class GameUpdate extends GameCore {
                 const b = this.bus;
                 this.particles.push(new Particle(b.x + rand(-15, 15), b.y + 10, rand(-0.5, 0.5), -1.2, 70, [60, 60, 60], 6, 0.4, false));
             }
-            if (this.boomTimer <= 0) {
-                if (this.money >= this.repairCost) this.state = "offer";
-                else this.finish("crash");
-            }
+            if (this.boomTimer <= 0) this.state = "offer";
             return;
         }
 
@@ -812,10 +895,13 @@ class GameUpdate extends GameCore {
         } else this.wrongWay = 0;
 
         const travelled = this.advanceCity(bus.speed);
+        if ([this.cityOffset, this.wx, this.wy, this.cityTravel].every(Number.isFinite)) {
+            this.lastGoodRoadPose = { edge: this.cityEdge.id, reverse: this.cityReverse, offset: this.cityOffset,
+                travel: this.cityTravel, wx: this.wx, wy: this.wy };
+        }
         this.updateCameraDirection();
         this.distance += Math.abs(travelled);
         this.scroll += travelled;
-        if (this.state === "turning") return;
         bus.speed = travelled;
         if (this.frame % 20 === 0) {
             this.trail.push([this.wx, this.wy]);

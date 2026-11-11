@@ -235,36 +235,9 @@ class GameRender extends GameUpdate {
         for (const t of this.texts) t.draw();
     }
 
-    drawTurning() {
-        // Маршрутка едет по дуге, камера плавно доворачивает за ней; старая улица растворяется в новой
-        const u = 1 - this.turnT / this.turnTotal, k = smooth(u);
-        const sign = this.turnSign, theta = this.turnAngle ?? (sign * Math.PI) / 2, phi = theta * k;
-        const [sx, sy] = this.turnStart;
-        // позиция и курс маршрутки в координатах старой улицы
-        const a = u * Math.abs(theta);
-        const B = [sx + sign * TURN_RADIUS * (1 - Math.cos(a)), sy - TURN_RADIUS * Math.sin(a)];
-        const E = [sx + sign * TURN_RADIUS * (1 - Math.cos(Math.abs(theta))), sy - TURN_RADIUS * Math.sin(Math.abs(theta))];
-        const E2 = [this.bus.x, this.bus.centerY];                   // та же точка на новой улице
-        const target = [sx + (E2[0] - sx) * k, sy + (E2[1] - sy) * k];
-
-        fillRect(0, 0, WIDTH, HEIGHT, GROUND);
-        ctx.save();
-        ctx.translate(target[0], target[1]);
-        ctx.rotate(-phi);
-        ctx.translate(-B[0], -B[1]);
-        // Новая улица повёрнута на угол её реального соседнего ребра.
-        ctx.save();
-        ctx.translate(E[0], E[1]);
-        ctx.rotate(theta);
-        ctx.translate(-E2[0], -E2[1]);
-        this.drawWorld(false);
-        ctx.restore();
-        ctx.globalAlpha = 1 - smooth(clamp(u * 1.4 - 0.2, 0, 1));
-        ctx.drawImage(this.snapshot, 0, 0);
-        ctx.globalAlpha = 1;
-        // маршрутка чуть опережает камеру — видно, как её заносит в поворот
-        this.bus.draw(this.frame, { x: B[0], y: B[1], angle: sign * a - this.bus.vx * 0.04 });
-        ctx.restore();
+    updateNavigationPanel() {
+        if (!this.navigationPanel && typeof CityNavigationPanel === "function") this.navigationPanel = new CityNavigationPanel(this);
+        this.navigationPanel?.update();
     }
 
     minimapRect() {
@@ -322,7 +295,6 @@ class GameRender extends GameUpdate {
         text("M · карта", bx + 6, by + 5, [180, 200, 210], 10);
         text(this.fitMinimapText(`${this.currentStreet()}, на ${this.compass()}`, size, 11),
             bx, by + size + 5, WHITE, 11, { bold: true });
-        this.drawExitSelector();
     }
 
     fitMinimapText(value, width, size = 11) {
@@ -335,34 +307,6 @@ class GameRender extends GameUpdate {
             else hi = middle - 1;
         }
         return `${label.slice(0, lo).trimEnd()}…`;
-    }
-
-    exitSelectorInfo() {
-        const options = this.cityOptions(), selected = this.selectedCityExit(options);
-        const exits = options.choices.filter((choice) => choice.side !== "uturn");
-        const next = this.cityItinerary.legs[(this.cityLegIndex + 1) % this.cityItinerary.legs.length];
-        const guide = this.cityOffRoute ? this.cityRouteExit() : null;
-        const expected = options.choices.find((choice) => choice.edge.id === (guide?.edge || next.edge.id) &&
-            choice.reverse === (guide?.edge ? guide.reverse : next.reverse));
-        return { selected, choice: selected || expected || options.straight || exits[0] || options.choices[0],
-            canCycle: exits.length > 1 || selected?.side === "uturn" || expected?.side === "uturn" };
-    }
-
-    drawExitSelector() {
-        const area = this.exitSelectorRect(), { selected, choice, canCycle } = this.exitSelectorInfo();
-        const arrow = { left: "←", right: "→", straight: "↑", uturn: "↶" };
-        const label = choice ? `${arrow[choice.side] || "↑"} ${choice.edge.street}` : "Нет выезда";
-        const color = selected ? YELLOW : this.cityOffRoute ? ORANGE : WHITE;
-        const distance = Math.round(Math.max(0, this.nextCross().a - this.along) * METERS_PER_PX);
-        const top = canCycle ? area.y : area.y + area.h - 22;
-        const height = canCycle ? area.h : 22;
-        panel(area.x, top, area.w, height, 0.92, canCycle ? color : [96, 126, 144]);
-        text(this.fitMinimapText(label, area.w - 12), area.x + 6, top + 5, color, 11, { bold: true });
-        if (canCycle) {
-            const hint = `${document.body.classList.contains("touch") ? "Тап" : "Q/E · тап"} · ${distance} м`;
-            text(this.fitMinimapText(hint, area.w - 12, 10), area.x + 6, top + 23,
-                [193, 210, 220], 10, { bold: true });
-        }
     }
 
     drawRouteOverview() {

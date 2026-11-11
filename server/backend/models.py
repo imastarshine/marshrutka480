@@ -84,3 +84,39 @@ class CityPoseMessage(StrictModel):
 class PingMessage(StrictModel):
     type: Literal["ping"]
     t: int | float = Field(ge=0, le=1e16, allow_inf_nan=False)
+
+
+class BugReportNPC(StrictModel):
+    id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.:-]+$")
+    edge: str = Field(max_length=120, pattern=r"^[A-Za-z0-9_.:-]*$")
+    reverse: bool
+    wx: float = Field(ge=-1e7, le=1e7, allow_inf_nan=False)
+    wy: float = Field(ge=-1e7, le=1e7, allow_inf_nan=False)
+    speed: float = Field(ge=-4, le=19, allow_inf_nan=False)
+
+
+class BugReportSignal(StrictModel):
+    node: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.:-]+$")
+    state: Literal["green", "yellow", "red"]
+    distance: float = Field(ge=-1e5, le=1e5, allow_inf_nan=False)
+
+
+class BugReport(StrictModel):
+    """Bounded scene telemetry; never accept arbitrary logs or credentials."""
+
+    version: str = Field(min_length=1, max_length=48, pattern=r"^[A-Za-z0-9_.+-]+$")
+    route: Literal["480", "10", "80", "83", "33", "112", "90", "Т4"]
+    edge: str = Field(max_length=120, pattern=r"^[A-Za-z0-9_.:-]*$")
+    reverse: bool
+    wx: float = Field(ge=-1e7, le=1e7, allow_inf_nan=False)
+    wy: float = Field(ge=-1e7, le=1e7, allow_inf_nan=False)
+    offset: float = Field(ge=0, le=1e8, allow_inf_nan=False)
+    lateral: float = Field(ge=-500, le=500, allow_inf_nan=False)
+    angle: float = Field(ge=-math.pi, le=math.pi, allow_inf_nan=False)
+    speed: float = Field(ge=-4, le=19, allow_inf_nan=False)
+    state: Literal["intro", "menu", "dialog", "play", "turning", "pause", "boom", "offer", "caught", "station", "over"]
+    lat: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False)
+    lon: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+    collision_id: str | None = Field(default=None, max_length=80, pattern=r"^[A-Za-z0-9_.:-]*$")
+    nearby_npcs: list[BugReportNPC] = Field(default_factory=list, max_length=20)
+    signals: list[BugReportSignal] = Field(default_factory=list, max_length=12)

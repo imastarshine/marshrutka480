@@ -111,7 +111,7 @@ class Intersection {
         this.k = k;                 // номер поперечной улицы на карте
         this.name = name;
         this.lanes = lanes;
-        this.h = roadWidthFor(lanes);
+        this.h = lanes * LANE_W;
         this.arms = arms;
         this.kind = arms.deadEnd && arms.physicalEnd ? "deadend" : arms.requiresChoice ? "junction" : "road";
         this.t = randint(0, CYCLE);
@@ -236,6 +236,7 @@ class Intersection {
     }
 
     drawLights(frame) {
+        if (this.hasSignal === false) return;
         const state = this.state, ln = this.stopLine;
         const lamps = [["red", [255, 50, 40]], ["yellow", [255, 200, 30]], ["green", [60, 230, 90]]];
         for (const x of [ROAD_LEFT + this.closed * LANE_W - 18, ROAD_RIGHT - this.closed * LANE_W + 18]) {

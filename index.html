@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Маршрутка 480</title>
+    <link rel="stylesheet" href="navigation.css?v=irkutsk-20261111-7">
     <style>
         html, body {
             margin: 0;
@@ -17,6 +18,8 @@
         }
 
         body {
+            --navigation-reserve: 112px;
+            --controls-reserve: 0px;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -25,7 +28,7 @@
 
         canvas {
             display: block;
-            width: min(100vw, calc(100vh * 640 / 760));
+            width: min(100vw, calc((100dvh - var(--navigation-reserve) - var(--controls-reserve)) * 640 / 760));
             height: auto;
             box-shadow: 0 0 40px rgba(0, 0, 0, 0.8);
         }
@@ -45,8 +48,14 @@
             display: flex;
         }
 
-        body.touch canvas {
-            width: min(100vw, calc((100vh - 130px) * 640 / 760));
+        body.touch {
+            --controls-reserve: 130px;
+        }
+
+        .navigation-dock {
+            min-height: var(--navigation-reserve);
+            width: min(100vw, calc((100dvh - var(--navigation-reserve) - var(--controls-reserve)) * 640 / 760));
+            max-width: 100%;
         }
 
         .group {
@@ -103,6 +112,7 @@
 </head>
 <body>
     <canvas id="game" width="640" height="760"></canvas>
+    <section id="street-navigation" class="navigation-dock" aria-label="Навигация по улицам"><div class="navigation-info"><div class="navigation-heading"><span class="navigation-name" data-navigation-name>Навигация</span><span class="navigation-distance" data-navigation-distance hidden></span></div><span class="navigation-detail" data-navigation-detail aria-live="polite" aria-atomic="true">Начните рейс — здесь появится маршрут</span></div><div class="navigation-actions" data-navigation-actions hidden><button type="button" data-navigation-step="-1" aria-label="Предыдущий съезд (Q)" title="Предыдущий съезд · Q">‹ <kbd>Q</kbd></button><button type="button" data-navigation-step="1" aria-label="Следующий съезд (E)" title="Следующий съезд · E">› <kbd>E</kbd></button></div><div class="navigation-help" data-navigation-help hidden><button type="button" data-report-bug title="Бесплатно восстановить рейс и отправить координаты ошибки">Произошёл баг</button><span class="bug-report-status" data-bug-report-status role="status" aria-live="polite"></span></div></section>
     <div class="controls">
         <div class="group">
             <button data-key="left">◀</button>
@@ -117,20 +127,21 @@
             <button data-key="up">▲</button>
         </div>
     </div>
-    <script src="js/config.js?v=irkutsk-20261111-6"></script>
-    <script src="js/city.js?v=irkutsk-20261111-6"></script>
-    <script src="js/utils.js?v=irkutsk-20261111-6"></script>
-    <script src="js/effects.js?v=irkutsk-20261111-6"></script>
-    <script src="js/scenery.js?v=irkutsk-20261111-6"></script>
-    <script src="js/vehicles.js?v=irkutsk-20261111-6"></script>
-    <script src="js/world.js?v=irkutsk-20261111-6"></script>
-    <script src="js/game.js?v=irkutsk-20261111-6"></script>
-    <script src="js/update.js?v=irkutsk-20261111-6"></script>
-    <script src="js/render.js?v=irkutsk-20261111-6"></script>
-    <script src="js/lobby.js?v=irkutsk-20261111-6"></script>
-    <script src="js/story.js?v=irkutsk-20261111-6"></script>
-    <script src="js/intro.js?v=irkutsk-20261111-6"></script>
-    <script src="js/main.js?v=irkutsk-20261111-6"></script>
+    <script src="js/config.js?v=irkutsk-20261111-7"></script>
+    <script src="js/city.js?v=irkutsk-20261111-7"></script>
+    <script src="js/utils.js?v=irkutsk-20261111-7"></script>
+    <script src="js/effects.js?v=irkutsk-20261111-7"></script>
+    <script src="js/scenery.js?v=irkutsk-20261111-7"></script>
+    <script src="js/vehicles.js?v=irkutsk-20261111-7"></script>
+    <script src="js/world.js?v=irkutsk-20261111-7"></script>
+    <script src="js/game.js?v=irkutsk-20261111-7"></script>
+    <script src="js/update.js?v=irkutsk-20261111-7"></script>
+    <script src="js/render.js?v=irkutsk-20261111-7"></script>
+    <script src="js/lobby.js?v=irkutsk-20261111-7"></script>
+    <script src="js/story.js?v=irkutsk-20261111-7"></script>
+    <script src="js/intro.js?v=irkutsk-20261111-7"></script>
+    <script src="js/navigation.js?v=irkutsk-20261111-7"></script>
+    <script src="js/main.js?v=irkutsk-20261111-7"></script>
 <a class="map-attribution" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a>
 </body>
 </html>
