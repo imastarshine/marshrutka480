@@ -111,7 +111,32 @@ const STORY = [
     },
 ];
 
-const storyChapter = (g) => STORY[g.save.story] || null;
+// The unified map has no screen-local police posts or motorcade scenes. Give
+// these chapters achievable driving goals while their world actors are absent.
+const CITY_STORY = {
+    2: { ...STORY[2],
+        intro: [["cop", "Сержант Сидоренко. Проверим, как ты держишь скорость на городских улицах."],
+            ["cop", "Проедь километр подряд не быстрее 70 км/ч. Без гонок — и договоримся."]],
+        goal: "Проедь 1 км подряд не быстрее 70 км/ч",
+        check: (g) => (g.storyFlags.safeDistance || 0) * METERS_PER_PX >= 1000,
+        progress: (g) => `${Math.min(1000,Math.floor((g.storyFlags.safeDistance||0)*METERS_PER_PX))}/1000 м`,
+    },
+    4: { ...STORY[4], title: "Важный рейс", start: undefined,
+        intro: [["boss", "Сегодня везём гостей города. Покажи, что на нашей линии можно ехать спокойно."],
+            ["boss", "Обслужи три остановки и довези людей без аварий и жалоб."]],
+        goal: "Обслужи 3 остановки без аварий и жалоб",
+        check: (g) => g.stopsServed >= 3 && !g.lastCollision && g.complaints === 0,
+        progress: (g) => `${g.stopsServed}/3 остановок · жалоб ${g.complaints}`,
+    },
+    5: { ...STORY[5], start: undefined,
+        intro: [["rival", "Думаешь, люди будут ездить на твоём 480-м? Посмотрим!"],
+            ["boss", "Докажи делом: заработай 800 рублей и обойдись без аварий."]],
+        goal: "Заработай 800 ₽ без аварий",
+        check: (g) => g.money >= 800 && !g.lastCollision,
+        progress: (g) => `${Math.max(0,Math.round(g.money))}/800 ₽`,
+    },
+};
+const storyChapter = (g) => (g.unifiedWorld && CITY_STORY[g.save.story]) || STORY[g.save.story] || null;
 
 // начало рейса: показать диалог главы (один раз), подготовить её условия
 function storyStart(g) {
@@ -132,6 +157,8 @@ function storyCheck(g) {
     const ch = storyChapter(g);
     if (!ch || g.storyDone || !g.storyFlags) return;
     g.storyFlags.started += 1;
+    g.storyFlags.safeDistance = g.bus.speed * KMH <= 70
+        ? (g.storyFlags.safeDistance || 0) + Math.max(0,g.bus.speed) : 0;
     if (!ch.check(g)) return;
     g.storyDone = true;
     const n = g.save.story + 1;

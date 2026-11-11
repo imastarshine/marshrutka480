@@ -68,7 +68,7 @@ class CityNavigationPanel {
         const crashed = game.state === "over" && game.result?.how === "crash";
         const name = crashed ? "Рейс прерван" : !active ? "Навигация" : selectable ? target.name || "Ближайший перекрёсток" : `По улице ${street}`;
         const detail = crashed ? "Можно бесплатно восстановить рейс" : !active ? "Начните рейс — здесь появится маршрут" : selectable
-            ? `${target.selected ? "Выбран" : target.options?.automatic ? "Далее" : "Выбери съезд"}: ${arrow} ${street}` : "Следуйте по дороге";
+            ? `${target.selected ? "Выбран" : target.options?.automatic ? "Далее" : "По навигатору"}: ${arrow} ${street}` : "Следуйте по дороге";
         const meters = Math.max(0, Number(target?.distanceMeters) || 0);
         const distance = meters < 10 ? "рядом" : meters >= 1000
             ? `${(meters / 1000).toFixed(1).replace(".", ",")} км` : `${Math.round(meters / 10) * 10} м`;
@@ -77,7 +77,7 @@ class CityNavigationPanel {
         this.setText(this.distance, distance);
         if (this.distance.hidden !== !selectable) this.distance.hidden = !selectable;
         if (this.actions.hidden !== !selectable) this.actions.hidden = !selectable;
-        const disabled = game.state !== "play" || game.mapOverview;
+        const disabled = game.state !== "play" || game.mapOverview || Boolean(target && game.cityWorldCommitted?.has(target.key));
         for (const button of this.buttons) if (button.disabled !== disabled) button.disabled = disabled;
         this.root.classList.toggle("has-choice", selectable);
         this.root.classList.toggle("has-selection", Boolean(target?.selected));

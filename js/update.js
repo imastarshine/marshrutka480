@@ -2,8 +2,22 @@
 "use strict";
 
 class GameUpdate extends GameCore {
+    cityTrafficActors() {
+        if (this.cityActorFrame !== this.frame) {
+            this.cityActors = this.serverTrafficActive ? window.citySession.traffic() : (this.localTraffic?.poses() || []);
+            this.cityActorFrame = this.frame;
+        }
+        return this.cityActors || [];
+    }
     // --- обновление ---
     updateCars() {
+        if (this.unifiedWorld) {
+            if (!this.serverTrafficActive) this.localTraffic?.update(this, 1 / 60);
+            this.cityActorFrame = -1;
+            this.cityTrafficActors();
+            this.serverCars = [];
+            return;
+        }
         if (this.serverTrafficActive) {
             this.serverCars = window.citySession.trafficProxies(this);
             return;
@@ -183,7 +197,7 @@ class GameUpdate extends GameCore {
     }
 
     updatePolice() {
-        if (this.serverTrafficActive) return;
+        if (this.unifiedWorld || this.serverTrafficActive) return;
         const p = this.police;
         if (!p) return;
         const bus = this.bus;
@@ -278,6 +292,18 @@ class GameUpdate extends GameCore {
     }
 
     updateWorldObjects() {
+        if (this.unifiedWorld) {
+            for (const inter of this.inters) {
+                if (inter.cityTravel !== undefined) inter.y = this.bus.centerY - (inter.cityTravel - this.cityTravel) - inter.h / 2;
+                if (inter.control?.signal) {
+                    const state = this.cityMapGeometry.signalState(inter.control, window.citySession);
+                    inter.t = state === "green" ? 0 : state === "yellow" ? GREEN_T : GREEN_T + YELLOW_T;
+                }
+                inter.crossCars = []; inter.peds.peds = [];
+            }
+            this.inters = this.inters.filter((inter) => inter.y > -1800 && inter.y < HEIGHT + 300);
+            return;
+        }
         const bus = this.bus, s = bus.speed;
         // маршрутка близко и едет быстро — пешеходы у бордюра ждут
         const busClose = (top) => bus.speed > 3 && bus.y - top > -bus.h && bus.y - top < 60 + bus.speed * 22;
@@ -630,7 +656,7 @@ class GameUpdate extends GameCore {
     }
 
     updateMotorcade() {
-        if (this.serverTrafficActive) return;
+        if (this.unifiedWorld || this.serverTrafficActive) return;
         const bus = this.bus, mins = Math.floor(this.clock / FRAMES_PER_MIN);
         // за час до кортежа — объявление
         if (this.motorcadeAt && !this.motorcadeAnnounced && mins >= this.motorcadeAt - 60) {
@@ -687,6 +713,23 @@ class GameUpdate extends GameCore {
     checkCollisions() {
         const bus = this.bus;
         if (bus.air || bus.invuln || bus.landing) return;
+        if (this.unifiedWorld) {
+            const pose = this.cityWorldPose, body = rect(pose.wx-bus.w/2+4,pose.wy-bus.h/2+4,bus.w-8,bus.h-8);
+            for (const car of this.cityTrafficActors()) {
+                if (car.collidable === false || (car.alpha ?? 1) < .25) continue;
+                const edge = this.cityGraph.edges.get(car.edge);
+                if (edge && this.cityMapGeometry.layer(edge) !== this.cityMapGeometry.layer(this.cityEdge)) continue;
+                const x=car.wx+Math.cos(car.angle)*(car.lateral||0), y=car.wy+Math.sin(car.angle)*(car.lateral||0);
+                if (Math.hypot(x-pose.wx,y-pose.wy) > bus.h+(car.h||92)) continue;
+                const other=rect(x-(car.w||50)/2+3,y-(car.h||92)/2+3,(car.w||50)-6,(car.h||92)-6);
+                if (!rotatedHit(body,pose.angle,other,car.angle)) continue;
+                this.cityCamera.update(this);
+                const [sx,sy]=this.cityCamera.worldToScreen(x,y);
+                this.crash(rect(sx-25,sy-46,50,92),null,car.id);
+                return;
+            }
+            return;
+        }
         const hb = inflate(bus.rect, -8, -8);
         for (const car of this.serverCars || []) {
             const body = rect(car.x - car.w / 2 + 3, car.y - car.h / 2 + 3, car.w - 6, car.h - 6);
@@ -727,19 +770,21 @@ class GameUpdate extends GameCore {
     captureBugReport() {
         const session = window.citySession, bus = this.bus;
         const finite = (value, fallback = 0) => Number.isFinite(value) ? value : fallback;
-        const nearby = session?.traffic ? session.traffic().filter((npc) =>
+        const nearby = this.cityTrafficActors().filter((npc) =>
             Number.isFinite(npc.wx) && Number.isFinite(npc.wy)).sort((a, b) =>
-            Math.hypot(a.wx - this.wx, a.wy - this.wy) - Math.hypot(b.wx - this.wx, b.wy - this.wy)).slice(0, 20) : [];
+            Math.hypot(a.wx - this.wx, a.wy - this.wy) - Math.hypot(b.wx - this.wx, b.wy - this.wy)).slice(0, 20);
+        const pose = this.cityWorldPose;
         return { version: GAME_VERSION, route: this.route.num, edge: this.cityEdge.id,
-            reverse: this.cityReverse, wx: this.wx, wy: this.wy, offset: this.cityOffset,
-            lateral: clamp(finite(bus.x - roadMiddle()), -500, 500), angle: Math.atan2(this.dir[0], -this.dir[1]),
-            speed: clamp(finite(bus.speed), -4, 19), state: this.state,
+            reverse: this.cityReverse, wx: pose.wx, wy: pose.wy, offset: this.cityOffset,
+            lateral: 0, angle: pose.angle,
+            speed: clamp(finite(this.cityWorldSpeed), -4, 19), state: this.state,
             collision_id: this.lastCollision?.id || null,
             nearby_npcs: nearby.map((npc) => ({ id: npc.id, edge: npc.edge, reverse: Boolean(npc.reverse),
                 wx: npc.wx, wy: npc.wy, speed: clamp(npc.speed || 0, -4, 19) })),
             signals: [...this.inters].filter((inter) => inter.hasSignal !== false && Number.isFinite(inter.y)).sort((a, b) =>
                 Math.abs(a.y - bus.centerY) - Math.abs(b.y - bus.centerY)).slice(0, 12).map((inter) => ({
-                    node: String(inter.k), state: inter.state, distance: bus.centerY - inter.y - inter.h / 2 })) };
+                    node: String(inter.k), state: inter.control?.signal ? this.cityMapGeometry.signalState(inter.control, session) : inter.state,
+                    distance: bus.centerY - inter.y - inter.h / 2 })) };
     }
 
     recoverFromBug() {
@@ -770,7 +815,7 @@ class GameUpdate extends GameCore {
         }
         // Recover on this same connected road. Never reset the shift or remove
         // shared NPCs for other players; look for room and grant temporary cover.
-        const actors = window.citySession?.traffic?.() || [];
+        const actors = this.cityTrafficActors();
         const edge = this.cityEdge, direction = this.cityReverse ? -1 : 1;
         let best = null;
         for (const delta of [0, -180, 180, -360, 360, 600]) {
@@ -855,6 +900,7 @@ class GameUpdate extends GameCore {
         if (this.state === "turning") this.state = "play";
         if (this.state === "boom") {
             this.bus.speed = 0;
+            this.updateCars();
             this.updateEffects();
             this.boomTimer -= 1;
             if (this.frame % 4 === 0) {
@@ -866,12 +912,13 @@ class GameUpdate extends GameCore {
         }
 
         const bus = this.bus;
+        this.cityCommitPath();
         bus.bay = this.bayExtra();
         bus.closed = approach(bus.closed, this.busClosed(), 0.75);
         bus.update(this.keys);
         // При нескольких боковых выездах ждём выбора улицы. Единственный
         // разрешённый изгиб проходит автоматически, это не тупик.
-        for (const inter of this.inters) {
+        for (const inter of this.unifiedWorld ? [] : this.inters) {
             if (inter.k !== this.nextCross().k) continue;
             const room = bus.y - (inter.y + 6);
             const options = this.cityOptions(inter.k);
@@ -909,7 +956,7 @@ class GameUpdate extends GameCore {
         }
         this.spawnObjects();
 
-        if (!this.serverTrafficActive && --this.spawnTimer <= 0 && !this.motorcade) {      // при перекрытии новых машин нет
+        if (!this.unifiedWorld && !this.serverTrafficActive && --this.spawnTimer <= 0 && !this.motorcade) {
             this.spawnCar();
             // больше полос — больше машин
             const hard = Math.min(1, this.distance / 60000), k = (4 / LANES) / this.route.traffic;

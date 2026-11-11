@@ -26,6 +26,13 @@ class GameCore {
         this.model = BUS_MODELS.find((m) => m.key === this.save.bus) || BUS_MODELS[0];
         this.route = ROUTES.find((r) => r.num === this.save.route) || ROUTES[0];
         if (this.cityGraph?.data !== IRKUTSK_CITY) this.cityGraph = new CityGraph(IRKUTSK_CITY);
+        this.unifiedWorld = true;
+        if (this.cityMapGeometry?.graph !== this.cityGraph) this.cityMapGeometry = new CityMapGeometry(this.cityGraph);
+        if (this.localTraffic?.graph !== this.cityGraph || this.localTraffic?.geometry !== this.cityMapGeometry) {
+            this.localTraffic = new LocalCityTraffic(this.cityGraph, this.cityMapGeometry);
+        }
+        this.cityCamera = new CityCamera();
+        this.cityActorFrame = -1; this.cityActors = [];
         this.cityItinerary = this.cityGraph.itinerary(this.route.num);
         this.cityLegIndex = 0;
         this.cityLap = 0;
@@ -40,9 +47,13 @@ class GameCore {
         this.cityPendingTurn = null;
         this.cityExitSelection = null;
         this.cityPlannedSelections = new Map();
+        this.cityWorldCommitted = new Map();
+        this.cityPlanRevision = 0;
         this.cityRejoinGuide = null;
         this.cityGeometryHistory = [];
         this.cityGeometryCache = null;
+        this.cityDrivingCache = null;
+        this.cityNavigationCache = null;
         this.cityRouteDirections = new Set(this.cityItinerary.legs.map((leg) => `${leg.edge.id}:${leg.reverse}`));
         this.cityRouteEdges = new Set(this.cityItinerary.legs.map((leg) => leg.edge.id));
         this.mapOverview = false;
@@ -131,10 +142,10 @@ class GameCore {
         this.honks = [];        // кадры недавних сигналов — за спам жалуются
         // кортеж: раз за смену в случайное время всё перекрывают
         this.motorcade = null;
-        this.motorcadeAt = randint(9 * 60, 16 * 60);
+        this.motorcadeAt = this.unifiedWorld ? null : randint(9 * 60, 16 * 60);
         this.motorcadeAnnounced = false;
         // ?kortezh в адресе — кортеж почти сразу (чтобы посмотреть)
-        if (typeof location !== "undefined" && /kortezh/.test(location.search)) this.motorcadeAt = SHIFT_START + 3;
+        if (!this.unifiedWorld && typeof location !== "undefined" && /kortezh/.test(location.search)) this.motorcadeAt = SHIFT_START + 3;
         this.spawnedLines = new Set();
         this.turnT = 0;
         this.turnTotal = 1;
@@ -365,7 +376,7 @@ class GameCore {
             const ordinary = options.choices.filter((choice) => choice.side !== "uturn");
             const recommended = expected && options.choices.find((choice) =>
                 choice.edge.id === expected.edge.id && choice.reverse === expected.reverse);
-            const choice = selected || options.automatic || recommended || ordinary[0] || options.choices[0] || null;
+            const choice = this.cityDrivingExit(edge, reverse, nodeId, options, expected);
             const terminal = recommended?.side === "uturn";
             const node = this.cityGraph.nodes.get(nodeId);
             const names = [...new Set([edge.street, choice?.edge.street]
@@ -375,8 +386,8 @@ class GameCore {
                 choices: options.choices, selected, choice, options, terminal,
                 canCycle: options.choices.length > 1 && (ordinary.length > 1 || terminal || selected?.side === "uturn") };
             if (ordinary.length > 1 || terminal || selected?.side === "uturn" || !options.automatic || distance >= 200000) break;
-            const continuation = selected || options.automatic;
-            if (!continuation || !this.cityCanContinue(edge, reverse, continuation)) break;
+            const continuation = choice;
+            if (!continuation) break;
             index = expected && continuation.edge.id === expected.edge.id && continuation.reverse === expected.reverse ? nextIndex : -1;
             edge = continuation.edge; reverse = continuation.reverse; distance += edge.length;
         }
@@ -445,7 +456,7 @@ class GameCore {
         let cache = this.cityGeometryCache;
         if (!cache || cache.edge !== current || cache.reverse !== this.cityReverse ||
             cache.offset !== this.cityOffset || cache.selection !== this.cityExitSelection ||
-            cache.pending !== this.cityPendingTurn) {
+            cache.pending !== this.cityPendingTurn || cache.revision !== this.cityPlanRevision) {
             const progress = this.cityReverse ? current.length - this.cityOffset : this.cityOffset;
             const segments = [{ edge: current, reverse: this.cityReverse, start: -progress, end: current.length - progress }];
             const history = this.cityGeometryHistory || [];
@@ -459,19 +470,8 @@ class GameCore {
                 const leg = segments.at(-1), node = graph.endpoint(leg.edge, leg.reverse);
                 const expectedIndex = legIndex < 0 ? -1 : (legIndex + 1) % this.cityItinerary.legs.length;
                 const expected = expectedIndex < 0 ? null : this.cityItinerary.legs[expectedIndex];
-                let option;
-                if (step === 0) {
-                    const options = this.cityOptions(node), selected = this.selectedCityExit(options);
-                    const pending = this.cityPendingTurn?.node === node
-                        ? options.choices.find((candidate) => candidate.edge.id === this.cityPendingTurn.edge && candidate.reverse === this.cityPendingTurn.reverse)
-                        : null;
-                    option = pending || selected || options.automatic ||
-                        (options.deadEnd ? options.choices.find((choice) => choice.side === "uturn") : null);
-                } else {
-                    const options = this.cityOptionsFor(leg.edge, leg.reverse, node);
-                    option = this.citySelectedExit(leg.edge, leg.reverse, node, options) || options.automatic ||
-                        (options.deadEnd ? options.choices.find((choice) => choice.side === "uturn") : null);
-                }
+                const options = this.cityOptionsFor(leg.edge, leg.reverse, node, expected);
+                const option = this.cityDrivingExit(leg.edge, leg.reverse, node, options, expected);
                 // A selected turn is already part of the visible continuous
                 // road. Crossing its source-node boundary never swaps scenes.
                 if (!option || graph.origin(option.edge, option.reverse) !== node ||
@@ -480,7 +480,7 @@ class GameCore {
                 legIndex = expected && option.edge.id === expected.edge.id && option.reverse === expected.reverse ? expectedIndex : -1;
             }
             cache = this.cityGeometryCache = { edge: current, reverse: this.cityReverse, offset: this.cityOffset,
-                selection: this.cityExitSelection, pending: this.cityPendingTurn, segments };
+                selection: this.cityExitSelection, pending: this.cityPendingTurn, revision: this.cityPlanRevision, segments };
         }
         const segments = cache.segments;
         let lo = 0, hi = segments.length - 1;
@@ -496,13 +496,15 @@ class GameCore {
     }
 
     cityEnter(option, nodeId) {
-        this.cityPlannedSelections.delete(this.citySelectionKey(this.cityEdge, this.cityReverse, nodeId));
+        const consumedKey = this.citySelectionKey(this.cityEdge, this.cityReverse, nodeId);
+        this.cityPlannedSelections.delete(consumedKey);
+        this.cityWorldCommitted.delete(consumedKey);
         const history = this.cityGeometryHistory || (this.cityGeometryHistory = []);
-        history.push({ edge: this.cityEdge, reverse: this.cityReverse });
-        let retained = 0, first = history.length - 1;
-        while (first >= 0 && retained < 8000) retained += history[first--].edge.length;
-        if (first >= 0) history.splice(0, first + 1);
+        history.push({ edge: this.cityEdge, reverse: this.cityReverse,
+            legIndex: this.cityLegIndex, lap: this.cityLap, offRoute: this.cityOffRoute });
+        if (history.length > 10000) history.splice(0, history.length - 10000);
         this.cityGeometryCache = null;
+        this.cityDrivingCache = null; this.cityNavigationCache = null;
         const legs = this.cityItinerary.legs;
         const nextIndex = (this.cityLegIndex + 1) % legs.length;
         const matches = (leg) => leg.edge.id === option.edge.id && leg.reverse === option.reverse;
@@ -547,9 +549,9 @@ class GameCore {
         const nodeId = this.cityGraph.endpoint(edge, reverse);
         if (!next || this.cityGraph.origin(next.edge, next.reverse) !== nodeId ||
             !this.cityGraph.canTurn(edge, nodeId, next.edge, next.reverse)) return false;
-        const selected = this.citySelectedExit(edge, reverse, nodeId) || this.cityAutomaticExit(edge, reverse);
-        if (selected) return selected.edge.id === next.edge.id && selected.reverse === next.reverse;
-        return next.edge.id === edge.id && next.reverse !== reverse && this.cityOrdinaryExits(edge, reverse, nodeId).length === 0;
+        const options = this.cityOptionsFor(edge, reverse, nodeId, next);
+        const selected = this.cityDrivingExit(edge, reverse, nodeId, options, next);
+        return Boolean(selected && selected.edge.id === next.edge.id && selected.reverse === next.reverse);
     }
 
     cityContinue(option, nodeId) {
@@ -557,19 +559,78 @@ class GameCore {
         // Source edges are geometry fragments, not separate levels. Cars,
         // scenery and intersections keep their identity and world position.
         setRoad(this.cityEdge.lanes);
-        for (const stop of this.stops) stop.edge = ROAD_RIGHT - this.closedW(stop.centerY);
+        for (const stop of this.stops) {
+            const edge = this.cityGraph.edges.get(stop.cityEdge);
+            if (edge) stop.edge = roadMiddle() + this.cityMapGeometry.halfWidth(edge, stop.cityOffset);
+        }
     }
 
     // Общая точка движения для обычной езды и конвоя: нельзя выехать за
     // конец ребра или оказаться на другой улице без общего перекрёстка.
     advanceCity(distance) {
         if (distance < 0) {
-            const room = this.cityReverse ? this.cityEdge.length - this.cityOffset : this.cityOffset;
-            const moved = Math.max(distance, -room);
-            this.cityOffset += this.cityReverse ? -moved : moved;
-            this.cityTravel += moved;
+            let remaining = -distance, moved = 0;
+            for (let step = 0; step < 10000 && remaining > 1e-7; step++) {
+                const room = this.cityReverse ? this.cityEdge.length - this.cityOffset : this.cityOffset;
+                const amount = Math.min(remaining, room);
+                this.cityOffset += this.cityReverse ? amount : -amount;
+                this.cityTravel -= amount; moved -= amount; remaining -= amount;
+                if (remaining <= 1e-7) break;
+                const previous = this.cityGeometryHistory.at(-1), outgoing = this.cityEdge, outgoingReverse = this.cityReverse;
+                const node = this.cityGraph.origin(outgoing, outgoingReverse);
+                if (!previous || this.cityGraph.endpoint(previous.edge, previous.reverse) !== node) break;
+                const options = this.cityOptionsFor(previous.edge, previous.reverse, node, null);
+                const retrace = options.choices.find((choice) => choice.edge.id === outgoing.id && choice.reverse === outgoingReverse);
+                if (!retrace) break;
+                this.cityGeometryHistory.pop();
+                this.cityEdge = previous.edge; this.cityReverse = previous.reverse;
+                this.cityOffset = previous.reverse ? 0 : previous.edge.length;
+                if (Number.isInteger(previous.legIndex)) {
+                    this.cityLegIndex = previous.legIndex; this.cityLap = previous.lap; this.cityOffRoute = previous.offRoute;
+                } else {
+                    const legs = this.cityItinerary.legs;
+                    let index = -1;
+                    for (let back = 1; back <= legs.length; back++) {
+                        const candidate = mod(this.cityLegIndex - back, legs.length), leg = legs[candidate];
+                        if (leg.edge.id === previous.edge.id && leg.reverse === previous.reverse) { index = candidate; break; }
+                    }
+                    this.cityOffRoute = index < 0;
+                    if (index >= 0) {
+                        if (index > this.cityLegIndex) this.cityLap = Math.max(0, this.cityLap - 1);
+                        this.cityLegIndex = index;
+                    }
+                }
+                // Reversing consumes the real driving history, not a new
+                // forward transition. Keep the road we just backed out of in
+                // the future trace so its rounded connector cannot change.
+                const key = this.citySelectionKey(previous.edge, previous.reverse, node);
+                this.cityPlannedSelections.set(key, { edge: outgoing.id, reverse: outgoingReverse });
+                this.cityWorldCommitted.set(key, { ...retrace, reversedHistory: true });
+                this.cityPendingTurn = null; this.cityExitSelection = null; this.cityRejoinGuide = null;
+                this.cityPlanRevision += 1;
+                this.streetK = this.cityEdge.index;
+                if (this.cityEdge.district && DISTRICTS[this.cityEdge.district]) this.district = this.cityEdge.district;
+                setRoad(this.cityEdge.lanes);
+            }
             [this.wx, this.wy] = this.cityGraph.position(this.cityEdge, this.cityOffset);
             this.dir = this.cityGraph.direction(this.cityEdge, this.cityReverse, this.cityOffset);
+            this.cityGeometryCache = null; this.cityNavigationCache = null; this.cityDrivingCache = null;
+            this.cityCommitPath();
+            this.cityGeometryAt(0);
+            let unlocked = false;
+            for (const leg of this.cityGeometryCache.segments) {
+                const key = this.citySelectionKey(leg.edge, leg.reverse);
+                const locked = this.cityWorldCommitted.get(key);
+                const lockStart = Number.isFinite(locked?.lockStartTravel) ? locked.lockStartTravel
+                    : this.cityTravel + leg.end - this.cityWorldTurnRadius;
+                if (locked?.reversedHistory && this.cityTravel < lockStart) {
+                    this.cityWorldCommitted.delete(key); unlocked = true;
+                }
+            }
+            if (unlocked) {
+                this.cityPlanRevision += 1;
+                this.cityGeometryCache = null; this.cityNavigationCache = null; this.cityDrivingCache = null;
+            }
             if (moved !== distance) this.bus.speed = moved;
             return moved;
         }
@@ -588,10 +649,8 @@ class GameCore {
             this.dir = this.cityGraph.direction(this.cityEdge, this.cityReverse, this.cityOffset);
             if (amount < room) break;
             const nodeId = this.nextCross().k, options = this.cityOptions(nodeId);
-            const pending = this.cityPendingTurn;
-            const pendingChoice = pending?.node === nodeId ? options.choices.find((item) =>
-                item.edge.id === pending.edge && item.reverse === pending.reverse) : null;
-            const selected = pendingChoice || this.selectedCityExit(options) || options.automatic;
+            const expected = this.cityOffRoute ? null : this.cityItinerary.legs[(this.cityLegIndex + 1) % this.cityItinerary.legs.length];
+            const selected = this.cityDrivingExit(this.cityEdge, this.cityReverse, nodeId, options, expected);
             if (selected) {
                 if (selected.side !== "straight") this.turns += 1;
                 this.cityContinue(selected, nodeId);
@@ -680,7 +739,7 @@ class GameCore {
             this.posts = this.posts.filter((post) => Math.abs(post.y - y) > 600);
             this.crosswalks = this.crosswalks.filter((crosswalk) => Math.abs(crosswalk.y - y) > 400);
             const stop = new BusStop(definition.id, y, this.route, this.rep, definition);
-            stop.edge = ROAD_RIGHT - this.closedW(stop.centerY);
+            stop.edge = roadMiddle() + this.cityMapGeometry.halfWidth(segment.edge, offset);
             stop.cityEdge = segment.edge.id;
             stop.cityReverse = segment.reverse;
             stop.citySpawnKey = definition.key;
@@ -748,8 +807,27 @@ class GameCore {
         // маршрутка должна целиком заехать в карман
         const bus = this.bus, r = bus.rect;
         if (Math.abs(bus.speed) > 0.3 || bus.air) return null;
+        if (this.unifiedWorld) return this.stops.find((stop) => {
+            const point = this.cityStopPlacement(stop);
+            return point && Math.abs(point.along) + bus.h / 2 < BusStop.HEIGHT / 2 - 20 &&
+                point.lateral + bus.w / 2 >= point.width + BAY_W - 18 &&
+                point.lateral + bus.w / 2 <= point.width + BAY_W + 12;
+        }) || null;
         return this.stops.find((s) => r.x + r.w >= s.edge + BAY_W - 18 &&
             bus.y > s.y + 20 && bus.y + bus.h < s.y + BusStop.HEIGHT - 20) || null;
+    }
+
+    cityStopPlacement(stop) {
+        const edge = this.cityGraph.edges.get(stop.cityEdge);
+        if (!edge || !this.cityMapGeometry.profile(edge).some((leg) => leg.edge.id === this.cityEdge.id)) return null;
+        const pose = this.cityWorldPose, direction = this.cityGraph.direction(edge, stop.cityReverse, stop.cityOffset);
+        const heading = [Math.sin(pose.angle), -Math.cos(pose.angle)];
+        if (direction[0] * heading[0] + direction[1] * heading[1] < 0.75) return null;
+        const [x, y] = this.cityGraph.position(edge, stop.cityOffset), dx = pose.wx - x, dy = pose.wy - y;
+        const along = dx * direction[0] + dy * direction[1];
+        if (Math.abs(along) > BusStop.HEIGHT / 2 + this.bus.h) return null;
+        return { along, lateral: -direction[1] * dx + direction[0] * dy,
+            width: this.cityMapGeometry.halfWidth(edge, stop.cityOffset) };
     }
 
     // --- ширина дороги по ходу улицы: сколько пикселей с каждого края занято парковкой ---
@@ -769,22 +847,10 @@ class GameCore {
 
     // сколько полос на сторону открыто на высоте y (дробно — на скосе)
     openAt(y) {
-        const distance = this.bus.centerY - y, radius = 900;
-        this.cityGeometryAt(distance);
-        const legs = this.cityGeometryCache.segments;
-        // Convolve source lane counts over a 58m ribbon. Even very short OSM
-        // fragments blend continuously rather than replacing the road width.
-        const cumulative = (value) => value <= -radius ? 0 : value >= radius ? 1
-            : value < 0 ? (value + radius) ** 2 / (2 * radius ** 2)
-                : 1 - (radius - value) ** 2 / (2 * radius ** 2);
-        let result = 0;
-        for (const leg of legs) {
-            if (leg.end < distance - radius || leg.start > distance + radius) continue;
-            result += leg.edge.lanes / 2 * (cumulative(leg.end - distance) - cumulative(leg.start - distance));
-        }
-        result += legs[0].edge.lanes / 2 * cumulative(legs[0].start - distance);
-        result += legs.at(-1).edge.lanes / 2 * (1 - cumulative(legs.at(-1).end - distance));
-        return clamp(result, 1, LANES / 2);
+        const point = this.cityGeometryAt(this.bus.centerY - y);
+        // One immutable physical width profile is shared by every observer.
+        // A different route or a selected exit never reshapes a city street.
+        return clamp(this.cityMapGeometry.halfWidth(point.edge, point.offset) / LANE_W, 1, LANES / 2);
     }
 
     closedLanesAt(y) {
@@ -808,6 +874,10 @@ class GameCore {
     // насколько маршрутке можно заехать вправо за край дороги (в карман остановки)
     bayExtra() {
         const bus = this.bus;
+        if (this.unifiedWorld) return Math.max(0, ...this.stops.map((stop) => {
+            const point = this.cityStopPlacement(stop);
+            return point ? BAY_W * clamp((BusStop.HEIGHT / 2 - Math.abs(point.along) - bus.h / 2) / BusStop.TAPER, 0, 1) : 0;
+        }));
         const at = (y) => Math.max(0, ...this.stops.map((s) => BAY_W * clamp(Math.min(y - s.y, s.y + BusStop.HEIGHT - y) / BusStop.TAPER, 0, 1)));
         return Math.min(at(bus.y + 4), at(bus.y + bus.h - 4));
     }
@@ -886,7 +956,7 @@ class GameCore {
 
     // нарушение: ДПС замечает его с шансом chance (блат снижает шанс) и добавляет звёзды розыска
     startChase(reason, chance = 1, stars = 1) {
-        if (this.serverTrafficActive) return;
+        if (this.unifiedWorld || this.serverTrafficActive) return;
         if (Math.random() > chance * (1 - 0.12 * this.level("blat")) * (1.15 - 0.3 * this.rep / 100)) {
             this.floatText("ДПС не заметили...", this.bus.x, this.bus.y + this.bus.h + 10, BLUE);
             return;
@@ -941,7 +1011,7 @@ class GameCore {
     }
 
     spawnPolice() {
-        if (this.serverTrafficActive) return;
+        if (this.unifiedWorld || this.serverTrafficActive) return;
         this.police = new Police(this.bus.x, Math.max(this.bus.speed, 0) + 2);
         this.floatText("ДПС!", this.bus.x, this.bus.y + this.bus.h + 20, [120, 170, 255], true);
     }
@@ -958,7 +1028,7 @@ class GameCore {
 
     // розыск гаснет, пока ДПС не на хвосте и ты не превышаешь; при 2+ звёздах ДПС возвращается
     updateWanted() {
-        if (this.serverTrafficActive) return;
+        if (this.unifiedWorld || this.serverTrafficActive) return;
         const bus = this.bus, stars = this.stars;
         // 3★ — вертолёт: за углом не скрыться, розыск не гаснет, пока он висит над тобой
         if (stars >= 3 && !this.heli) {
@@ -983,7 +1053,7 @@ class GameCore {
     }
 
     spawnRoadblock() {
-        if (this.serverTrafficActive) return;
+        if (this.unifiedWorld || this.serverTrafficActive) return;
         this.roadblockIn = 60 * 9;
         const y = -CAR_H - 60;
         if (!this.areaFree(y, CAR_H) || this.inters.some((i) => i.y < 200)) {
@@ -1022,9 +1092,11 @@ class GameCore {
             }
             if (dot > 0.64) sides.straight = true;
         }
-        const signal = adjacent.length >= 3 || Boolean(node?.junction) || node?.osmTags?.highway === "traffic_signals";
+        const control = this.cityMapGeometry.junction(edge, reverse);
+        const signal = control.signal;
         const options = this.cityOptionsFor(edge, reverse, nodeId);
-        return { lanes, direction: incoming, signal, name: crossStreet || edge.street,
+        return { lanes: control.width / LANE_W, direction: incoming, signal, control,
+            stop: control.stop, yield: control.yield, stopLine: control.stopLine, name: crossStreet || edge.street,
             arms: { ...sides, deadEnd: options.deadEnd, physicalEnd: options.physicalEnd,
                 requiresChoice: options.requiresChoice } };
     }
@@ -1036,7 +1108,7 @@ class GameCore {
             if (leg.end < -500 || leg.end > this.bus.centerY + 900) continue;
             const nodeId = this.cityGraph.endpoint(leg.edge, leg.reverse);
             const layout = this.cityJunction(leg.edge, leg.reverse, nodeId);
-            if (!layout.signal && !layout.arms.deadEnd && !layout.arms.requiresChoice) continue;
+            if (!layout.signal && !layout.stop && !layout.yield && !layout.arms.deadEnd && !layout.arms.requiresChoice) continue;
             const key = this.citySelectionKey(leg.edge, leg.reverse, nodeId);
             const travel = this.cityTravel + leg.end;
             visible.add(key);
@@ -1049,7 +1121,10 @@ class GameCore {
                 inter.cityIncoming = leg.edge.id;
                 inter.cityReverse = leg.reverse;
                 inter.signalDirection = layout.direction;
+                inter.control = layout.control;
                 inter.hasSignal = layout.signal;
+                inter.hasStop = layout.stop;
+                inter.hasYield = layout.yield;
                 inter.closed = this.closedLanesAt(y + inter.h / 2);
                 inter.passed = leg.end < 0;
                 this.inters.push(inter);
@@ -1084,8 +1159,8 @@ class GameCore {
         // Перекрёстки и остановки привязаны к графу, а не к случайной сетке.
         this.spawnCityJunctions();
         this.spawnCityStops();
+        if (this.unifiedWorld || this.serverTrafficActive) return;
         this.spawnCityBridge();
-        if (this.serverTrafficActive) return;
         if (this.inters.some((i) => !i.arms.straight && i.y > -200)) {
             // впереди тупик: за ним ничего не появляется
             for (const k in this.nextIn) this.nextIn[k] = Math.max(this.nextIn[k], 300);
@@ -1125,7 +1200,7 @@ class GameCore {
     }
 
     spawnCar() {
-        if (this.serverTrafficActive) return;
+        if (this.unifiedWorld || this.serverTrafficActive) return;
         const oncoming = this.cityGraph.canTraverse(this.cityEdge, !this.cityReverse) && Math.random() < 0.45;
         const lane = oncoming ? randint(0, ownFirst() - 1) : randint(ownFirst(), LANES - 1);
         const speed = rand(3, 8);
@@ -1180,13 +1255,20 @@ class GameCore {
             this.cityGraph.origin(option.edge, option.reverse) !== nodeId ||
             !this.cityGraph.canTurn(this.cityEdge, nodeId, option.edge, option.reverse) ||
             remaining > Math.max(inter.h / 2 + 30, 240)) return false;
+        const key = this.citySelectionKey(this.cityEdge, this.cityReverse, nodeId);
+        const locked = this.cityWorldCommitted.get(key);
+        if (locked && (locked.edge.id !== option.edge.id || locked.reverse !== option.reverse)) {
+            this.showBanner("Выезд уже начат", YELLOW, 100);
+            return false;
+        }
         // Steering selects the same connected path as Q/E. The next edge is
         // visible before the node and advanceCity consumes it without a frozen
         // screenshot, a new scenery instance or a respawn of local traffic.
-        this.cityPlannedSelections.set(this.citySelectionKey(this.cityEdge, this.cityReverse, nodeId),
+        this.cityPlannedSelections.set(key,
             { edge: option.edge.id, reverse: option.reverse });
         this.cityPendingTurn = { sign, node: nodeId, inter, edge: option.edge.id, reverse: option.reverse };
-        this.cityGeometryCache = null;
+        this.cityPlanRevision += 1;
+        this.cityGeometryCache = null; this.cityDrivingCache = null; this.cityNavigationCache = null;
         return true;
     }
 

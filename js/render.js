@@ -2,237 +2,12 @@
 "use strict";
 
 class GameRender extends GameUpdate {
-    // --- отрисовка ---
-    drawRoad() {
-        fillRect(-MARGIN, 0, WIDTH + MARGIN * 2, HEIGHT, GROUND);
-        this.scenery.draw(this.frame);
-        fillRect(ROAD_LEFT - 38, 0, 38, HEIGHT, SIDEWALK);
-        fillRect(ROAD_RIGHT, 0, 40, HEIGHT, SIDEWALK);
-        const off = mod(this.scroll, 30);
-        for (let i = -1; i < HEIGHT / 30 + 1; i++) {
-            const y = i * 30 + off;
-            line(ROAD_RIGHT, y, ROAD_RIGHT + 40, y, [150, 150, 140], 1);
-            line(ROAD_LEFT - 38, y, ROAD_LEFT, y, [150, 150, 140], 1);
-        }
-        line(ROAD_LEFT - 38, 0, ROAD_LEFT - 38, HEIGHT, [120, 120, 112], 3);
-        line(ROAD_RIGHT + 40, 0, ROAD_RIGHT + 40, HEIGHT, [120, 120, 112], 3);
-        this.strips[0].draw(this.scroll);
-        this.strips[1].draw(this.scroll);
-        for (const b of this.bridges) b.drawWater(this.frame);
-        fillRect(ROAD_LEFT, 0, ROAD_RIGHT - ROAD_LEFT, HEIGHT, ASPHALT);
-        line(ROAD_LEFT + 3, 0, ROAD_LEFT + 3, HEIGHT, WHITE, 3);
-        line(ROAD_RIGHT - 3, 0, ROAD_RIGHT - 3, HEIGHT, WHITE, 3);
-        const off2 = mod(this.scroll, 60);
-        for (let i = 1; i < LANES; i++) {
-            const x = ROAD_LEFT + LANE_W * i;
-            if (i === LANES / 2) {   // двойная сплошная: слева встречка
-                line(x - 3, 0, x - 3, HEIGHT, [235, 235, 235], 2);
-                line(x + 3, 0, x + 3, HEIGHT, [235, 235, 235], 2);
-                continue;
-            }
-            for (let y = -60 + off2; y < HEIGHT; y += 60) line(x, y, x, y + 30, WHITE, 3);
-        }
-        this.drawClosedLanes();
-        for (const b of this.bridges) b.drawDeck();
-        for (const c of this.crosswalks) c.draw(this.closedW(c.y + Crosswalk.H / 2));
-        for (const inter of this.inters) inter.drawRoad();
-    }
-
-    // у переходов, перекрёстков, остановок, постов и мостов деревьев на тротуаре не ставим
-    parkingFree(y0, y1) {
-        const busy = [
-            ...this.crosswalks.map((c) => [c.y - 40, c.bottom + 40]),
-            ...this.inters.map((i) => [i.y - 60, i.y + i.h + 60]),
-            ...this.stops.map((st) => [st.y - 30, st.y + BusStop.HEIGHT + 30]),
-            ...this.posts.map((p) => [p.y - 30, p.y + 120]),
-            ...this.stations.map((st) => [st.y - 30, st.y + PoliceStation.HEIGHT + 30]),
-            ...this.bridges.map((b) => [b.y - 30, b.y + b.h + 30]),
-        ];
-        return busy.every(([a, b]) => y1 < a || y0 > b);
-    }
-
-    drawClosedLanes() {
-        // закрытые полосы — это продолжение тротуара: плитка, бордюр, у новой кромки — белая линия.
-        // разновидность — парковка у дороги (рисуется поверх плитки ниже)
-        const pts = [];
-        for (let y = -20; y <= HEIGHT + 20; y += 8) pts.push([y, this.closedW(y)]);
-        if (pts.every(([, w]) => w < 1)) return;
-        const off = mod(this.scroll, 30);
-        for (const side of [-1, 1]) {
-            const edge = (w) => (side < 0 ? ROAD_LEFT + w : ROAD_RIGHT - w);
-            const base = side < 0 ? ROAD_LEFT - 2 : ROAD_RIGHT + 2;
-            const outline = [[base, -20], ...pts.map(([y, w]) => [edge(w), y]), [base, HEIGHT + 20]];
-            poly(outline, SIDEWALK);
-            ctx.save();
-            ctx.beginPath();
-            outline.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-            ctx.closePath();
-            ctx.clip();
-            // плитка: швы по рядам, каждый второй ряд со сдвигом — как у обычного тротуара, только шире
-            const x0 = side < 0 ? ROAD_LEFT : ROAD_RIGHT - 3 * LANE_W, x1 = x0 + 3 * LANE_W;
-            for (let i = -1; i < HEIGHT / 30 + 1; i++) {
-                const y = i * 30 + off;
-                line(x0, y, x1, y, [150, 150, 140], 1);
-                const row = Math.round((y - this.scroll) / 30);
-                for (let x = x0 + (mod(row, 2) ? 15 : 0); x < x1; x += 30) line(x, y, x, y + 30, [158, 158, 148], 1);
-            }
-            ctx.restore();
-            // бордюр и разметка края проезжей части
-            for (const [c, wdt, inset] of [[[120, 120, 112], 4, 0], [WHITE, 3, side * -6]]) {
-                ctx.strokeStyle = col(c);
-                ctx.lineWidth = wdt;
-                ctx.beginPath();
-                pts.forEach(([y, w], i) => (i ? ctx.lineTo(edge(w) - inset, y) : ctx.moveTo(edge(w) - inset, y)));
-                ctx.stroke();
-            }
-        }
-        // вариант «парковка»: ближняя к дороге закрытая полоса — асфальт с разметкой и машинами
-        for (let y = -20; y < HEIGHT + 20; y += 4) {
-            const w = this.closedW(y);
-            if (w < 30 || this.styleAt(y) !== "parking") continue;
-            const pw = Math.min(w, LANE_W) - 4;
-            fillRect(ROAD_LEFT + w - pw, y, pw, 4.5, [92, 92, 98]);
-            fillRect(ROAD_RIGHT - w, y, pw, 4.5, [92, 92, 98]);
-        }
-        const PSTEP = 115, poff = mod(this.scroll, PSTEP);
-        for (let py = poff - PSTEP; py < HEIGHT + PSTEP; py += PSTEP) {
-            const n = Math.floor(this.closedW(py) / LANE_W + 0.02);
-            if (!n || this.styleAt(py) !== "parking" || this.styleAt(py + CAR_H) !== "parking") continue;
-            // только там, где ширина постоянная (не на скосе)
-            if (Math.abs(this.closedW(py - 10) - this.closedW(py + CAR_H + 10)) > 2 || !this.parkingFree(py, py + CAR_H)) continue;
-            const slot = Math.round((py - this.scroll) / PSTEP);
-            for (const lane of [n - 1, LANES - n]) {
-                line(laneCenter(lane) - LANE_W / 2 + 4, py - 8, laneCenter(lane) + LANE_W / 2 - 4, py - 8, WHITE, 2, 0.6);
-                if (hash(slot, lane, this.turns) < 0.3) continue;
-                const c = CAR_COLORS[Math.floor(hash(slot, lane, 5) * CAR_COLORS.length)];
-                drawCarBody(rect(laneCenter(lane) - CAR_W / 2, py, CAR_W, CAR_H - 8), c, false);
-            }
-        }
-        // на широком тротуаре — редкие деревья в кадках
-        const STEP = 160, toff = mod(this.scroll, STEP);
-        for (let py = toff - STEP; py < HEIGHT + STEP; py += STEP) {
-            const n = Math.floor(this.closedW(py) / LANE_W + 0.02);
-            if (n < 2 || this.closedW(py + 40) < n * LANE_W - 1 || !this.parkingFree(py - 20, py + 40)) continue;
-            for (const x of [laneCenter(0), laneCenter(LANES - 1)]) {
-                circle(x, py + 10, 18, [120, 110, 100]);
-                tree(x, py + 10, 15);
-            }
-        }
-    }
-
-    drawMotorcade() {
-        const m = this.motorcade;
-        if (!m) return;
-        const flash = Math.floor(this.frame / 6) % 2;
-        // регулировщики ДПС у кромки дороги
-        for (const o of m.officers) {
-            if (o.y < -40 || o.y > HEIGHT + 40) continue;
-            const cw = this.closedW(o.y), x = o.side < 0 ? ROAD_LEFT + cw + 14 : ROAD_RIGHT - cw - 14, y = o.y;   // у кромки проезжей части
-            fillRect(x - 7, y, 14, 18, [60, 90, 60], 1, 4);
-            fillRect(x - 7, y + 4, 14, 4, [230, 230, 60]);
-            circle(x, y - 6, 7, SKIN);
-            ring(x, y - 9, 6, [40, 60, 40], 3);
-            const a = Math.sin(this.frame * 0.15 + o.y) * 0.7;
-            line(x, y + 6, x - o.side * Math.cos(a) * 20, y + 6 + Math.sin(a) * 20, WHITE, 4);
-        }
-        // колонна едет по встречке навстречу (вниз по экрану)
-        for (const v of m.convoy) {
-            if (v.y > HEIGHT + 50 || v.y + v.len < -50) continue;
-            ctx.save();
-            ctx.translate(v.x, v.y + v.len / 2);
-            ctx.rotate(Math.PI);
-            const w = 54, h = v.len, x = -w / 2, y = -h / 2;
-            fillRect(x + 4, y + 6, w, h, [0, 0, 0], 0.3, 12);
-            if (v.kind === "limo") {
-                fillRect(x, y, w, h, [18, 18, 22], 1, 12);
-                strokeRect(x, y, w, h, [70, 70, 80], 2, 12);
-                fillRect(x + 6, y + 14, w - 12, 18, [45, 55, 70], 1, 4);
-                fillRect(x + 6, y + h - 28, w - 12, 14, [45, 55, 70], 1, 4);
-                fillRect(x + 8, y + 40, w - 16, h - 80, [30, 30, 36], 1, 4);
-                for (const fx of [x + 4, x + w - 4]) {               // флажки на крыльях
-                    line(fx, y + 4, fx, y - 10, [200, 200, 200], 2);
-                    fillRect(fx - (fx < 0 ? 0 : 12), y - 14, 12, 8, [235, 235, 240]);
-                    fillRect(fx - (fx < 0 ? 0 : 12), y - 10, 12, 4, [40, 80, 190]);
-                }
-            } else if (v.kind === "ambulance") {
-                fillRect(x, y, w, h, [245, 245, 245], 1, 10);
-                strokeRect(x, y, w, h, BLACK, 2, 10);
-                fillRect(x, y + h / 2 - 6, w, 12, [230, 60, 50]);
-                fillRect(-5, y + 50, 10, 30, [230, 60, 50]);
-                fillRect(-15, y + 60, 30, 10, [230, 60, 50]);
-                fillRect(x + 6, y + 10, w - 12, 16, GLASS, 1, 4);
-                fillRect(x + 8, y + 32, w - 16, 6, flash ? [60, 120, 255] : [30, 40, 110]);
-            } else {
-                fillRect(x, y, w, h, [235, 235, 240], 1, 11);
-                fillRect(x, y + 38, w, 14, [30, 70, 170]);
-                strokeRect(x, y, w, h, BLACK, 2, 11);
-                fillRect(x + 6, y + 12, w - 12, 17, GLASS, 1, 4);
-                fillRect(x + 8, y + 32, 16, 6, flash ? [255, 40, 40] : [110, 30, 30]);
-                fillRect(x + w - 24, y + 32, 16, 6, !flash ? [60, 120, 255] : [30, 40, 110]);
-                circle(0, y + 35, 34, flash ? [255, 40, 40] : [60, 120, 255], 0.25);
-            }
-            circle(x + 10, y + 2, 4, [255, 250, 210]);                // фары
-            circle(x + w - 10, y + 2, 4, [255, 250, 210]);
-            ctx.restore();
-        }
-    }
-
+    // Geographic world rendering lives in CityWorldRenderer.
     drawWorld(withBus = true) {
-        // 1) всё рисуем во внеэкранный холст (шире экрана на MARGIN с каждой стороны)
-        ctx = worldCtx;
-        ctx.setTransform(1, 0, 0, 1, MARGIN, 0);
-        this.drawRoad();
-        for (const sk of this.skids) fillRect(sk.x - 3, sk.y, 6, 8, [20, 20, 20], Math.min(150, sk.life) / 255);
-        for (const r of this.ramps) r.draw();
-        for (const p of this.posts) p.draw(this.frame);
-        for (const st of this.stations) st.draw(this.frame);
-        const here = this.currentStop();
-        for (const s of this.stops) s.draw(this.frame, s === here);
-        for (const c of this.crosswalks) c.peds.draw(c.y + 2);
-        for (const w of this.walkers) w.draw();
-        if (!this.serverTrafficActive) for (const c of this.cars) c.draw(this.frame);
-        for (const i of this.inters) i.drawCars();
-        this.drawMotorcade();
-        if (this.police) this.police.draw(this.frame);
-        for (const i of this.inters) i.drawLights(this.frame);
-        for (const p of this.particles) if (p.world) p.draw();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx = screenCtx;
-
-        // 2) переносим на экран полосками, каждая со своим сдвигом — дорога изгибается
-        const SLICE = 4;
-        for (let y = 0; y < HEIGHT; y += SLICE) {
-            const dx = this.bendOffset(y + SLICE / 2);
-            ctx.drawImage(worldCanvas, 0, y, worldCanvas.width, SLICE, dx - MARGIN, y, worldCanvas.width, SLICE + 0.5);
+        if (!this.cityRenderer || this.cityRenderer.graph !== this.cityGraph) {
+            this.cityRenderer = new CityWorldRenderer(this.cityGraph, this.cityMapGeometry);
         }
-        window.citySession?.drawTraffic(this);
-        window.citySession?.drawPlayers(this);
-        if (this.heli) this.heli.drawLight(this.bus.x, this.bus.centerY);
-        if (withBus) this.bus.draw(this.frame, { x: this.bus.x, y: this.bus.centerY, angle: this.bendAngle() });
-        if (this.heli && withBus) this.heli.draw();
-        if (this.hornT && withBus) {                      // звуковые волны перед маршруткой
-            for (let i = 0; i < 3; i++) {
-                const k = (26 - this.hornT) / 26 + i * 0.25;
-                if (k > 1) continue;
-                ctx.strokeStyle = col([255, 200, 120], (1 - k) * 0.8);
-                ctx.lineWidth = 4;
-                ctx.beginPath();
-                ctx.arc(this.bus.x, this.bus.y + 10, 20 + k * 90, -Math.PI * 0.8, -Math.PI * 0.2);
-                ctx.stroke();
-            }
-        }
-
-        if (this.bus.speed > 9 && this.state === "play") {      // линии скорости
-            const k = (this.bus.speed - 9) / (this.bus.maxSpeed - 9);
-            for (let i = 0; i < Math.floor(10 * k); i++) {
-                const x = rand(0, WIDTH), y = rand(HUD_H, HEIGHT);
-                line(x, y, x, y + 60 * k + 20, [255, 255, 255], 2, 0.27);
-            }
-        }
-        if (this.bus.speed < 0 && Math.floor(this.frame / 15) % 2 === 0) {
-            text("ЗАДНИЙ ХОД", this.bus.x, this.bus.y + this.bus.h + 16, WHITE, 14, { align: "center", base: "middle" });
-        }
-        for (const t of this.texts) t.draw();
+        this.cityRenderer.draw(this, withBus);
     }
 
     updateNavigationPanel() {
@@ -249,7 +24,8 @@ class GameRender extends GameUpdate {
         const { x: bx, y: by, w: size } = this.minimapRect();
         fillRect(bx, by, size, size, [15, 20, 25], 0.82);
         const scale = 40 / BLOCK, cx = bx + size / 2, cy = by + size / 2;
-        const toMap = (x, y) => [cx + (x - this.wx) * scale, cy + (y - this.wy) * scale];
+        const pose = this.cityWorldPose;
+        const toMap = (x, y) => [cx + (x - pose.wx) * scale, cy + (y - pose.wy) * scale];
 
         ctx.save();
         ctx.beginPath();
@@ -286,7 +62,7 @@ class GameRender extends GameUpdate {
             circle(px, py, 4, [255, 60, 60]);
         }
         window.citySession?.drawMinimap(this, {bx,by,size,toMap,cx,cy});
-        const [dx, dy] = this.dir;
+        const [dx, dy] = [Math.sin(pose.angle), -Math.cos(pose.angle)];
         poly([[cx + dx * 8, cy + dy * 8], [cx - dx * 5 - dy * 5, cy - dy * 5 + dx * 5],
             [cx - dx * 5 + dy * 5, cy - dy * 5 - dx * 5]], YELLOW);
         ctx.restore();
@@ -388,7 +164,8 @@ class GameRender extends GameUpdate {
         if (!view) return;
         window.citySession?.drawOverview(this, view);
         const { area, toMap } = view;
-        const [px, py] = toMap(this.wx, this.wy), [dx, dy] = this.dir;
+        const pose = this.cityWorldPose;
+        const [px, py] = toMap(pose.wx, pose.wy), [dx, dy] = [Math.sin(pose.angle), -Math.cos(pose.angle)];
         circle(px, py, 9, [5, 15, 22], 0.9);
         poly([[px + dx * 8, py + dy * 8], [px - dx * 5 - dy * 5, py - dy * 5 + dx * 5],
             [px - dx * 5 + dy * 5, py - dy * 5 - dx * 5]], YELLOW);

@@ -1,19 +1,19 @@
 // Маршрутка — настройки: константы, улучшения, автопарк, маршруты, районы.
 //
 // Код разбит на обычные <script> (без сборки, работает и через file://). Порядок подключения
-// в index.html важен: config → utils → effects → scenery → vehicles → world → game → update → render → lobby → main.
+// в index.html важен: данные/утилиты → мировая геометрия → объекты → game → city-driving/traffic → update/render → main.
 
 "use strict";
 
 // ---------- настройки ----------
 const WIDTH = 640, HEIGHT = 760;
-const GAME_VERSION = "2.2.0-beta.4";
+const GAME_VERSION = "2.3.0-beta.1";
 const HUD_H = 70;
 
 // дорога зависит от улицы: 2, 4 или 6 полос (левая половина — встречка); меняет setRoad()
 let LANES = 4, LANE_W = 90, ROAD_LEFT = 120, ROAD_RIGHT = 480;
-// дорога физически всегда на 6 полос (по 3 в каждую сторону); открыто от 1 до 3 на сторону, остальное —
-// парковка и бульвар. CLOSED — сколько полос на сторону закрыто в начале улицы; дальше ширину меняют LaneShift
+// Шесть виртуальных полос задают только диапазон рулевого управления. Мировая
+// поверхность и плавные сужения рассчитываются CityMapGeometry, независимо от маршрута.
 let CLOSED = 0;
 const BAY_W = 64;              // ширина кармана остановки справа от дороги
 
@@ -38,7 +38,7 @@ const BRIBE_RATE = 0.6, HONEST_COP = 0.2, STATION_MINUTES = 90;
 const ESCORT_FRAMES = 160, STATION_CARD = 220;   // конвой за машиной ДПС, затем сцена в отделе
 
 const BLOCK = 3000;            // масштаб миникарты в игровых пикселях
-const GREEN_T = 300, YELLOW_T = 70, RED_T = 280;
+const GREEN_T = 290, YELLOW_T = 25, RED_T = 335; // две фазы по 325 кадров, между ними 10 кадров общего красного
 const CYCLE = GREEN_T + YELLOW_T + RED_T;
 const COMBO_TIME = 240;
 const MAX_COMBO = 5;

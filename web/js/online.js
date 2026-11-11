@@ -1,4 +1,4 @@
-// Multiplayer is an overlay on the original Game. Only remote buses interpolate.
+// Shared city poses are interpolated in world coordinates, then viewed by one camera.
 "use strict";
 class CitySession {
     constructor() {
@@ -164,12 +164,9 @@ class CitySession {
         }
     }
     pose(g) {
-        const wx=g.wx, wy=g.wy, lateral=g.bus.x-roadMiddle();
-        const before=g.cityGeometryAt(-35).position, ahead=g.cityGeometryAt(35).position;
-        const angle=Math.hypot(ahead[0]-before[0],ahead[1]-before[1])>.01
-            ?Math.atan2(ahead[0]-before[0],before[1]-ahead[1]):Math.atan2(g.dir[0],-g.dir[1]);
-        return {wx,wy,lateral,angle:Math.atan2(Math.sin(angle),Math.cos(angle)),
-            speed:g.state==="play"?g.bus.speed:0,jump:g.bus.z,door:g.bus.doorOpen,braking:g.bus.braking,
+        const {wx,wy,angle}=g.cityWorldPose;
+        return {wx,wy,lateral:0,angle:Math.atan2(Math.sin(angle),Math.cos(angle)),
+            speed:g.state==="play"?clamp(g.cityWorldSpeed,-4,19):0,jump:g.bus.z,door:g.bus.doorOpen,braking:g.bus.braking,
             bus:g.model.key,route:g.route.num,state:g.state,street:g.currentStreet().slice(0,60),edge:g.cityEdge.id};
     }
     beforeTick(g) {
@@ -182,7 +179,7 @@ class CitySession {
             const [i,j] = g.node(inter.k);
             const direction=inter.signalDirection||g.dir;
             inter.t = worldFrame + Math.floor(hash(i,j,this.state.seed)*CYCLE) +
-                (Math.abs(direction[1])>=Math.abs(direction[0])?0:GREEN_T+YELLOW_T);
+                (Math.abs(direction[1])>=Math.abs(direction[0])?0:CYCLE/2);
         }
     }
     color(p) {
@@ -190,99 +187,12 @@ class CitySession {
     }
     visible(p) { return !["intro","menu","over"].includes(p.state); }
     worldPosition(p) {
-        return [p.wx+Math.cos(p.angle)*p.lateral,p.wy+Math.sin(p.angle)*p.lateral];
-    }
-    screenRoads(g) {
-        g.cityGeometryAt(0);
-        const trace=g.cityGeometryCache, intersections=g.inters;
-        if(this.screenRoadCache?.game===g && this.screenRoadCache.trace===trace &&
-            this.screenRoadCache.intersections===intersections && this.screenRoadCache.count===intersections.length) return this.screenRoadCache;
-        const main=new Map(), branches=new Map(), graph=g.cityGraph;
-        const add=(map,id,leg)=>{if(!map.has(id))map.set(id,[]);map.get(id).push(leg);};
-        for(const leg of trace.segments)add(main,leg.edge.id,leg);
-        // Cross streets are drawn as horizontal strips by Intersection. Map
-        // their short connected approaches onto those strips, not onto houses.
-        for(const inter of intersections) {
-            let junction=null;
-            for(const leg of trace.segments) {
-                const origin=graph.origin(leg.edge,leg.reverse), end=graph.endpoint(leg.edge,leg.reverse);
-                if(origin!==inter.k && end!==inter.k)continue;
-                const ahead=origin===inter.k?leg.start:leg.end;
-                if(!junction || Math.abs(ahead)<Math.abs(junction.ahead))junction={leg,ahead};
-            }
-            if(!junction)continue;
-            const nodeY=inter.y+inter.h/2;
-            if(nodeY<-400 || nodeY>HEIGHT+400)continue;
-            const incoming=graph.direction(junction.leg.edge,junction.leg.reverse,
-                graph.origin(junction.leg.edge,junction.leg.reverse)===inter.k?
-                    (junction.leg.reverse?junction.leg.edge.length:0):(junction.leg.reverse?0:junction.leg.edge.length));
-            for(const first of graph.adjacent.get(inter.k)||[]) {
-                if(main.has(first.id))continue;
-                const reverse=first.to===inter.k, direction=graph.direction(first,reverse);
-                const cross=incoming[0]*direction[1]-incoming[1]*direction[0];
-                const side=cross<0?-1:1;
-                if(!inter.arms[side<0?"left":"right"] || Math.abs(cross)<.2)continue;
-                let edge=first, reversed=reverse, start=0;
-                const seen=new Set();
-                for(let step=0;step<64&&start<1800;step++) {
-                    if(seen.has(edge.id)||main.has(edge.id))break;
-                    seen.add(edge.id);add(branches,edge.id,{edge,reverse:reversed,start,side,nodeY});
-                    const node=graph.endpoint(edge,reversed);
-                    const candidates=(graph.adjacent.get(node)||[]).filter(next=>next.id!==edge.id &&
-                        !seen.has(next.id) && !main.has(next.id));
-                    if(candidates.length!==1)break;
-                    const next=candidates[0];
-                    if(!g.citySameRoad(edge,next)&&(graph.adjacent.get(node)||[]).length!==2)break;
-                    start+=edge.length;reversed=next.to===node;edge=next;
-                }
-            }
-        }
-        return this.screenRoadCache={game:g,trace,intersections,count:intersections.length,main,branches};
+        return [p.wx+Math.cos(p.angle)*(p.lateral||0),p.wy+Math.sin(p.angle)*(p.lateral||0)];
     }
     project(g,p) {
-        const roads=this.screenRoads(g),graph=g.cityGraph;
-        // The road renderer uses distance along a curved ribbon as screen Y.
-        // Orthographic GPS projection disagrees with that Y on bends and puts
-        // cars on the sidewalk. Use the very same ribbon for road and actors.
-        const ids=new Set();
-        if(p.edge&&graph.edges.has(p.edge)) {
-            ids.add(p.edge);
-            const own=graph.edges.get(p.edge);
-            // Interpolation can cross a shared endpoint between snapshots.
-            // A distant fork does not make its parallel roads part of this scene.
-            for(const [node,offset] of [[own.from,0],[own.to,own.length]]) {
-                const [x,y]=graph.position(own,offset);
-                if(Math.hypot(p.wx-x,p.wy-y)>240)continue;
-                for(const edge of graph.adjacent.get(node)||[])ids.add(edge.id);
-            }
-        } else for(const map of [roads.main,roads.branches])for(const id of map.keys())ids.add(id);
-        let best=null;
-        for(const id of ids)for(const [kind,map] of [["main",roads.main],["branch",roads.branches]]) {
-            for(const leg of map.get(id)||[]) {
-                const point=graph.project(leg.edge,p.wx,p.wy);
-                if(point.distance>180)continue;
-                const along=leg.start+(leg.reverse?leg.edge.length-point.offset:point.offset);
-                const score=point.distance+(id===p.edge?0:.05)+Math.abs(along)*.00001;
-                if(!best||score<best.score)best={kind,leg,point,along,score};
-            }
-        }
-        // A nearby parallel road/bridge outside the rendered road scene still
-        // appears on the map; its traffic must not be painted over buildings.
-        if(!best)return {x:Infinity,y:Infinity,angle:0};
-        const {kind,leg,point}=best, direction=graph.direction(leg.edge,leg.reverse,point.offset);
-        const dx=p.wx-point.point[0]+Math.cos(p.angle)*(p.lateral||0);
-        const dy=p.wy-point.point[1]+Math.sin(p.angle)*(p.lateral||0);
-        const along=best.along+dx*direction[0]+dy*direction[1];
-        const lateral=-direction[1]*dx+direction[0]*dy;
-        const relative=Math.atan2(Math.sin(p.angle-Math.atan2(direction[0],-direction[1])),
-            Math.cos(p.angle-Math.atan2(direction[0],-direction[1])));
-        if(kind==="branch") {
-            const y=leg.nodeY+leg.side*lateral;
-            return {x:roadMiddle()+g.bendOffset(y)+leg.side*along,y,angle:leg.side*Math.PI/2+relative};
-        }
-        const y=g.bus.centerY-along;
-        const angle=Math.atan2(g.bendOffset(y-16)-g.bendOffset(y+16),32);
-        return {x:roadMiddle()+g.bendOffset(y)+lateral,y,angle:angle+relative};
+        g.cityCamera.update(g);
+        const [x,y]=g.cityCamera.worldToScreen(...this.worldPosition(p));
+        return {x,y,angle:p.angle-g.cityCamera.heading};
     }
     drawPlayers(g) {
         this.drawnPlayers = 0;
