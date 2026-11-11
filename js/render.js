@@ -45,6 +45,7 @@ class GameRender extends GameUpdate {
             ...this.inters.map((i) => [i.y - 60, i.y + i.h + 60]),
             ...this.stops.map((st) => [st.y - 30, st.y + BusStop.HEIGHT + 30]),
             ...this.posts.map((p) => [p.y - 30, p.y + 120]),
+            ...this.stations.map((st) => [st.y - 30, st.y + PoliceStation.HEIGHT + 30]),
             ...this.bridges.map((b) => [b.y - 30, b.y + b.h + 30]),
         ];
         return busy.every(([a, b]) => y1 < a || y0 > b);
@@ -119,6 +120,63 @@ class GameRender extends GameUpdate {
         }
     }
 
+    drawMotorcade() {
+        const m = this.motorcade;
+        if (!m) return;
+        const flash = Math.floor(this.frame / 6) % 2;
+        // регулировщики ДПС у кромки дороги
+        for (const o of m.officers) {
+            if (o.y < -40 || o.y > HEIGHT + 40) continue;
+            const cw = this.closedW(o.y), x = o.side < 0 ? ROAD_LEFT + cw + 14 : ROAD_RIGHT - cw - 14, y = o.y;   // у кромки проезжей части
+            fillRect(x - 7, y, 14, 18, [60, 90, 60], 1, 4);
+            fillRect(x - 7, y + 4, 14, 4, [230, 230, 60]);
+            circle(x, y - 6, 7, SKIN);
+            ring(x, y - 9, 6, [40, 60, 40], 3);
+            const a = Math.sin(this.frame * 0.15 + o.y) * 0.7;
+            line(x, y + 6, x - o.side * Math.cos(a) * 20, y + 6 + Math.sin(a) * 20, WHITE, 4);
+        }
+        // колонна едет по встречке навстречу (вниз по экрану)
+        for (const v of m.convoy) {
+            if (v.y > HEIGHT + 50 || v.y + v.len < -50) continue;
+            ctx.save();
+            ctx.translate(v.x, v.y + v.len / 2);
+            ctx.rotate(Math.PI);
+            const w = 54, h = v.len, x = -w / 2, y = -h / 2;
+            fillRect(x + 4, y + 6, w, h, [0, 0, 0], 0.3, 12);
+            if (v.kind === "limo") {
+                fillRect(x, y, w, h, [18, 18, 22], 1, 12);
+                strokeRect(x, y, w, h, [70, 70, 80], 2, 12);
+                fillRect(x + 6, y + 14, w - 12, 18, [45, 55, 70], 1, 4);
+                fillRect(x + 6, y + h - 28, w - 12, 14, [45, 55, 70], 1, 4);
+                fillRect(x + 8, y + 40, w - 16, h - 80, [30, 30, 36], 1, 4);
+                for (const fx of [x + 4, x + w - 4]) {               // флажки на крыльях
+                    line(fx, y + 4, fx, y - 10, [200, 200, 200], 2);
+                    fillRect(fx - (fx < 0 ? 0 : 12), y - 14, 12, 8, [235, 235, 240]);
+                    fillRect(fx - (fx < 0 ? 0 : 12), y - 10, 12, 4, [40, 80, 190]);
+                }
+            } else if (v.kind === "ambulance") {
+                fillRect(x, y, w, h, [245, 245, 245], 1, 10);
+                strokeRect(x, y, w, h, BLACK, 2, 10);
+                fillRect(x, y + h / 2 - 6, w, 12, [230, 60, 50]);
+                fillRect(-5, y + 50, 10, 30, [230, 60, 50]);
+                fillRect(-15, y + 60, 30, 10, [230, 60, 50]);
+                fillRect(x + 6, y + 10, w - 12, 16, GLASS, 1, 4);
+                fillRect(x + 8, y + 32, w - 16, 6, flash ? [60, 120, 255] : [30, 40, 110]);
+            } else {
+                fillRect(x, y, w, h, [235, 235, 240], 1, 11);
+                fillRect(x, y + 38, w, 14, [30, 70, 170]);
+                strokeRect(x, y, w, h, BLACK, 2, 11);
+                fillRect(x + 6, y + 12, w - 12, 17, GLASS, 1, 4);
+                fillRect(x + 8, y + 32, 16, 6, flash ? [255, 40, 40] : [110, 30, 30]);
+                fillRect(x + w - 24, y + 32, 16, 6, !flash ? [60, 120, 255] : [30, 40, 110]);
+                circle(0, y + 35, 34, flash ? [255, 40, 40] : [60, 120, 255], 0.25);
+            }
+            circle(x + 10, y + 2, 4, [255, 250, 210]);                // фары
+            circle(x + w - 10, y + 2, 4, [255, 250, 210]);
+            ctx.restore();
+        }
+    }
+
     drawWorld(withBus = true) {
         // 1) всё рисуем во внеэкранный холст (шире экрана на MARGIN с каждой стороны)
         ctx = worldCtx;
@@ -127,12 +185,14 @@ class GameRender extends GameUpdate {
         for (const sk of this.skids) fillRect(sk.x - 3, sk.y, 6, 8, [20, 20, 20], Math.min(150, sk.life) / 255);
         for (const r of this.ramps) r.draw();
         for (const p of this.posts) p.draw(this.frame);
+        for (const st of this.stations) st.draw(this.frame);
         const here = this.currentStop();
         for (const s of this.stops) s.draw(this.frame, s === here);
         for (const c of this.crosswalks) c.peds.draw(c.y + 2);
         for (const w of this.walkers) w.draw();
         for (const c of this.cars) c.draw(this.frame);
         for (const i of this.inters) i.drawCars();
+        this.drawMotorcade();
         if (this.police) this.police.draw(this.frame);
         for (const i of this.inters) i.drawLights(this.frame);
         for (const p of this.particles) if (p.world) p.draw();
@@ -148,6 +208,17 @@ class GameRender extends GameUpdate {
         if (this.heli) this.heli.drawLight(this.bus.x, this.bus.centerY);
         if (withBus) this.bus.draw(this.frame, { x: this.bus.x, y: this.bus.centerY, angle: this.bendAngle() });
         if (this.heli && withBus) this.heli.draw();
+        if (this.hornT && withBus) {                      // звуковые волны перед маршруткой
+            for (let i = 0; i < 3; i++) {
+                const k = (26 - this.hornT) / 26 + i * 0.25;
+                if (k > 1) continue;
+                ctx.strokeStyle = col([255, 200, 120], (1 - k) * 0.8);
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.arc(this.bus.x, this.bus.y + 10, 20 + k * 90, -Math.PI * 0.8, -Math.PI * 0.2);
+                ctx.stroke();
+            }
+        }
 
         if (this.bus.speed > 9 && this.state === "play") {      // линии скорости
             const k = (this.bus.speed - 9) / (this.bus.maxSpeed - 9);
@@ -247,7 +318,7 @@ class GameRender extends GameUpdate {
     }
 
     drawHud() {
-        const chase = this.police && !this.police.leaving;
+        const chase = this.police && !this.police.leaving && this.state !== "station";
         if (chase) {     // мигалка по краям экрана
             const c = Math.floor(this.frame / 8) % 2 ? [255, 40, 40] : [60, 120, 255];
             strokeRect(7, 7, WIDTH - 14, HEIGHT - 14, c, 14, 0, 0.35);
@@ -283,13 +354,26 @@ class GameRender extends GameUpdate {
         text(`Пассажиры ${n}/${this.capacity}`, 410, 12, full ? ORANGE : WHITE, 14, { bold: true });
         // часы смены: под вечер краснеют
         const mins = Math.floor(this.clock / FRAMES_PER_MIN), late = SHIFT_END - mins < 60;
-        const hhmm = `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
-        text(hhmm, 626, 12, late && Math.floor(this.frame / 20) % 2 ? RED : [255, 220, 120], 15, { bold: true, align: "right" });
+        text(hhmm(mins), 626, 12, late && Math.floor(this.frame / 20) % 2 ? RED : [255, 220, 120], 15, { bold: true, align: "right" });
         fillRect(410, 34, 216, 12, [50, 52, 64], 1, 6);
         if (n) fillRect(410, 34, (216 * n) / this.capacity, 12, full ? ORANGE : [90, 200, 90], 1, 6);
         text(`${this.fare} ₽ за проезд · ${this.perTick} чел. за раз`, 410, 50, [150, 155, 170], 11);
 
         this.drawStopPanel();
+        const goal = storyGoalText(this);
+        if (goal && this.state !== "station") {             // цель главы сюжета
+            const w = Math.min(WIDTH - 280, textWidth(goal, 12, true) + 20);
+            panel(WIDTH / 2 - w / 2, HEIGHT - 92, w, 24, 0.75, [255, 210, 80]);
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(WIDTH / 2 - w / 2 + 6, HEIGHT - 92, w - 12, 24);
+            ctx.clip();
+            text(goal, WIDTH / 2, HEIGHT - 80, [255, 220, 120], 12, { bold: true, align: "center", base: "middle" });
+            ctx.restore();
+        }
+        if (this.motorcadeAt && this.motorcadeAnnounced) {
+            text(`Кортеж ~${hhmm(this.motorcadeAt)}`, WIDTH - 12, HEIGHT - 96, [255, 210, 80], 13, { bold: true, align: "right", base: "middle", shadow: true });
+        }
         this.drawStars();
         this.drawRepPopup();
         this.drawNotice();

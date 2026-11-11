@@ -428,6 +428,42 @@ class Ramp {
     }
 }
 
+class PoliceStation {
+    // отдел полиции у дороги: если проезжаешь мимо в розыске — оттуда выезжает погоня
+    static HEIGHT = 300;
+
+    constructor(y, edge) {
+        this.y = y;
+        this.edge = edge;           // правый край открытой дороги
+        this.checked = false;
+    }
+
+    draw(frame) {
+        const y = this.y, H = PoliceStation.HEIGHT, e = this.edge;
+        fillRect(e, y - 20, WIDTH + MARGIN - e, H + 40, SIDEWALK);
+        fillRect(e + 6, y + 10, 76, H - 20, [80, 80, 86], 1, 6);               // стоянка служебных машин
+        for (let i = 0; i < 3; i++) {
+            const cy = y + 22 + i * 90;
+            line(e + 10, cy - 8, e + 78, cy - 8, WHITE, 2, 0.6);
+            fillRect(e + 22, cy, 44, 74, [235, 235, 240], 1, 9);
+            fillRect(e + 22, cy + 30, 44, 11, [30, 70, 170]);
+            fillRect(e + 27, cy + 8, 34, 14, GLASS, 1, 3);
+            const on = (Math.floor(frame / 8) + i) % 2;
+            fillRect(e + 28, cy + 24, 14, 5, on ? [255, 40, 40] : [110, 30, 30]);
+            fillRect(e + 46, cy + 24, 14, 5, !on ? [60, 120, 255] : [30, 40, 110]);
+        }
+        const bx = e + 96, bw = 190;
+        shadow(bx, y + 20, bw, H - 40, 12);
+        fillRect(bx, y + 20, bw, H - 40, [165, 172, 185], 1, 4);              // здание
+        strokeRect(bx + 6, y + 26, bw - 12, H - 52, [130, 138, 150], 3, 3);
+        fillRect(bx, y + H / 2 - 16, bw, 32, [30, 70, 170]);
+        text("ПОЛИЦИЯ", bx + bw / 2, y + H / 2, WHITE, 18, { bold: true, align: "center", base: "middle" });
+        line(bx - 8, y + 30, bx - 8, y + 70, [200, 200, 200], 3);              // флагшток
+        fillRect(bx - 8, y + 30, 20, 12, [235, 235, 240]);
+        fillRect(bx - 8, y + 36, 20, 6, [40, 80, 190]);
+    }
+}
+
 class PolicePost {
     static HEIGHT = 90;
 

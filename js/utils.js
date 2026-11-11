@@ -185,7 +185,7 @@ function textWidth(str, size = 14, bold = false) {
 }
 
 function loadSave() {
-    const data = { wallet: 0, best: 0, rep: 50, upgrades: {}, buses: ["gazel"], bus: "gazel", routes: ["480"], route: "480" };
+    const data = { wallet: 0, best: 0, rep: 50, story: 0, storySeen: -1, upgrades: {}, buses: ["gazel"], bus: "gazel", routes: ["480"], route: "480" };
     try {
         Object.assign(data, JSON.parse(localStorage.getItem(SAVE_KEY)) || {});
     } catch (e) { /* нет сохранения — начинаем с нуля */ }
@@ -214,6 +214,34 @@ function writeSave(data) {
     try {
         localStorage.setItem(SAVE_KEY, JSON.stringify(data));
     } catch (e) { /* приватный режим — просто не сохраняем */ }
+}
+
+// звук гудка: два «рычащих» тона; аудио создаётся при первом нажатии (так требуют браузеры)
+let audioCtx = null;
+function hornSound() {
+    try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const t = audioCtx.currentTime, gain = audioCtx.createGain();
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(0.18, t + 0.02);
+        gain.gain.setValueAtTime(0.18, t + 0.3);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
+        gain.connect(audioCtx.destination);
+        for (const f of [392, 494]) {
+            const osc = audioCtx.createOscillator();
+            osc.type = "sawtooth";
+            osc.frequency.value = f;
+            osc.connect(gain);
+            osc.start(t);
+            osc.stop(t + 0.45);
+        }
+    } catch (e) { /* без звука — не страшно */ }
+}
+
+// минуты от полуночи -> "ЧЧ:ММ"
+function hhmm(mins) {
+    mins = Math.floor(mins);
+    return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
 }
 
 // пробег: до километра — в метрах, дальше — в км

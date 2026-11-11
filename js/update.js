@@ -30,7 +30,7 @@ class GameUpdate extends GameCore {
                     if (!bus.air && this.laneBlockedByBus(target) && near(bus.y, bus.h)) side.push(Math.abs(bus.speed));
                     if (side.length) car.yieldTo = Math.min(...side);
                 }
-            } else if (!parked && !car.changing && car.y > 60 && car.y < HEIGHT - 150 && Math.random() < 0.004) {
+            } else if (!parked && !this.motorcade && !car.changing && car.y > 60 && car.y < HEIGHT - 150 && Math.random() < 0.004) {
                 const target = car.lane + choice([-1, 1]);
                 if (target >= lo && target <= hi && this.laneOpen(target, ...look) && this.laneFreeFor(car, target)) {
                     car.targetLane = target;
@@ -118,10 +118,16 @@ class GameUpdate extends GameCore {
             } else {
                 if (!parked) {
                     car.braking = false;
-                    car.speed = Math.min(car.baseSpeed, car.speed + 0.05);
+                    // посигналили — какое-то время едет быстрее
+                    car.speed = Math.min(car.baseSpeed + (car.hurry > 0 ? 3 : 0), car.speed + (car.hurry > 0 ? 0.15 : 0.05));
                 }
             }
 
+            // перекрытие: попутные машины встают в пробку
+            if (this.motorcade && d < 0 && !parked) {
+                car.speed = approach(car.speed, 0, 0.2);
+                car.braking = car.speed > 0;
+            }
             const prev = car.y + CAR_H / 2 - bus.centerY;
             const oldY = car.y;
             car.y += bus.speed + d * car.speed;
@@ -203,21 +209,17 @@ class GameUpdate extends GameCore {
             if (!bus.air && hit(inflate(p.rect, 16, 16), bus.rect)) p.touch += 1;
             else p.touch = Math.max(0, p.touch - 1);
             if (p.touch > 25) {
-                // поймали: штраф умножается на звёзды; 4★ — ещё и жалобы, 5★ — лишение прав
+                // поймали: выбор — взятка или отдел (см. payBribe / goToStation)
                 const stars = Math.max(1, this.stars), fine = this.policeFine * stars;
+                const bribe = Math.round((fine * (stars >= MAX_STARS ? 1.5 : BRIBE_RATE)) / 50) * 50;
                 p.leaving = true;
-                this.wanted = 0;
-                this.money -= fine;
+                bus.speed = 0;
                 this.comboTimer = 0;
                 this.shake = 8;
-                this.floatText(`-${fine} ₽`, bus.x, bus.y - 30, RED, true);
-                if (stars >= MAX_STARS) {
-                    this.showBanner("Лишён прав! Рейс окончен", RED);
-                    this.finish("arrested");
-                    return;
-                }
-                this.showBanner(`Остановлен ДПС! Штраф ${fine} ₽ (${"★".repeat(stars)})`, RED);
-                if (stars >= 4) this.addComplaints(2, "Протокол ДПС!");
+                this.caught = { stars, fine, bribe };
+                if (this.storyFlags) this.storyFlags.caught = true;
+                this.state = "caught";
+                return;
             } else if (p.timer > this.chaseTime * (0.6 + 0.4 * this.stars) || p.y > HEIGHT + 380) {
                 this.escapePolice("Ушёл от ДПС!");
             }
@@ -317,6 +319,15 @@ class GameUpdate extends GameCore {
         }
         this.ramps = this.ramps.filter((r) => r.y > -600 && r.y < HEIGHT + 300);
 
+        for (const st of this.stations) {
+            st.y += s;
+            if (!st.checked && st.y + PoliceStation.HEIGHT / 2 > bus.centerY) {
+                st.checked = true;
+                if (this.stars) this.startChase("заметили у отдела полиции", 0.85, 0);
+                else this.floatText("Отдел полиции — тут лучше не нарушать", ROAD_RIGHT - 120, st.y + 40, BLUE);
+            }
+        }
+        this.stations = this.stations.filter((st) => st.y > -800 && st.y < HEIGHT + 400);
         for (const post of this.posts) {
             post.y += s;
             if (!post.checked && post.y + 40 > bus.centerY) {
@@ -329,7 +340,10 @@ class GameUpdate extends GameCore {
                 if (kmh > SPEED_LIMIT) {
                     this.floatText(`Радар: ${kmh} км/ч!`, ROAD_RIGHT - 60, post.y, RED, true);
                     this.startChase(`превышение ${kmh} км/ч`, 0.85, kmh > SPEED_LIMIT + 30 ? 2 : 1);
-                } else this.floatText("ДПС: счастливого пути", ROAD_RIGHT - 80, post.y, GREEN);
+                } else {
+                    this.floatText("ДПС: счастливого пути", ROAD_RIGHT - 80, post.y, GREEN);
+                    if (this.storyFlags) this.storyFlags.radarOk = true;
+                }
             }
         }
         this.posts = this.posts.filter((p) => p.y > -600 && p.y < HEIGHT + 400);
@@ -517,6 +531,9 @@ class GameUpdate extends GameCore {
         this.moneyShown += (this.money - this.moneyShown) * 0.15;
         this.shake = Math.max(0, this.shake - 1);
         this.flash = Math.max(0, this.flash - 12);
+        this.hornT = Math.max(0, this.hornT - 1);
+        this.hornCool = Math.max(0, this.hornCool - 1);
+        for (const c of this.cars) if (c.hurry > 0) c.hurry -= 1;
     }
 
     explode(r, big = true) {
@@ -560,10 +577,98 @@ class GameUpdate extends GameCore {
         this.boomTimer = 80;
     }
 
+    // конвой в отдел: маршрутка сама едет за машиной ДПС, остальные уступают
+    updateEscort() {
+        const bus = this.bus, p = this.police, s = 5;
+        bus.speed = s;
+        bus.vx = 0;
+        bus.doorOpen = 0;
+        bus.invuln = 0;
+        this.scroll += s;
+        this.distance += s;
+        this.wx += this.dir[0] * s;
+        this.wy += this.dir[1] * s;
+        this.scenery.update(s);
+        for (const list of [this.stops, this.ramps, this.posts, this.crosswalks, this.bridges, this.stations, this.shifts, this.inters, this.skids]) {
+            for (const o of list) o.y += s;
+        }
+        if (this.motorcade) for (const o of this.motorcade.officers) o.y += s;
+        this.cars = this.cars.filter((c) => !(Math.abs(c.x - bus.x) < LANE_W && c.y < bus.y + bus.h + 40 && c.y > -300));
+        for (const c of this.cars) c.y += s + c.dir * c.speed;
+        // машина ДПС обгоняет по соседней полосе и встаёт впереди
+        const ahead = bus.y - Police.H - 50, passing = p.y > ahead + 20;
+        p.x = approach(p.x, bus.x + (passing ? (bus.x > roadMiddle() + LANE_W ? -LANE_W : LANE_W) : 0), 4);
+        p.y = approach(p.y, ahead, 6);
+        p.leaving = false;
+        p.speed = s;
+        this.updateEffects();
+    }
+
+    updateMotorcade() {
+        const bus = this.bus, mins = Math.floor(this.clock / FRAMES_PER_MIN);
+        // за час до кортежа — объявление
+        if (this.motorcadeAt && !this.motorcadeAnnounced && mins >= this.motorcadeAt - 60) {
+            this.motorcadeAnnounced = true;
+            this.showBanner(`Около ${hhmm(this.motorcadeAt)} перекроют дорогу: поедет кортеж`, [255, 210, 80], 240);
+        }
+        if (!this.motorcade && this.motorcadeAt && mins >= this.motorcadeAt) {
+            // ждём спокойного места: без погони и без перекрёстка на экране
+            if (this.police || this.inters.some((i) => i.y > -500 && i.y < HEIGHT)) {
+                this.motorcadeAt = mins + 1;
+                return;
+            }
+            this.motorcadeAt = null;
+            const officers = [];
+            for (const y of [140, 400, 660]) officers.push({ y, side: -1 }, { y: y - 70, side: 1 });
+            this.motorcade = { phase: "closing", t: 0, convoy: [], officers, violated: false };
+            this.showBanner("Перекрытие! Едет кортеж — остановись", [255, 210, 80], 300);
+        }
+        const m = this.motorcade;
+        if (!m) return;
+        m.t += 1;
+        for (const o of m.officers) o.y += bus.speed;
+        // не остановился во время перекрытия
+        if (!m.violated && m.t > 150 && bus.speed * KMH > 20) {
+            m.violated = true;
+            this.startChase("не остановился перед кортежем", 0.9, 2);
+        }
+        if (m.phase === "closing" && m.t > 360) {
+            m.phase = "passing";
+            const x = laneCenter(ownFirst() - 1);
+            this.cars = this.cars.filter((c) => !(c.dir > 0 && Math.abs(c.x - x) < LANE_W));   // встречка прижалась к обочине
+            let y = -150;
+            for (const kind of ["cop", "cop", "limo", "limo", "limo", "ambulance", "cop"]) {
+                const len = kind === "limo" ? 132 : kind === "ambulance" ? 110 : 96;
+                y -= len;
+                m.convoy.push({ kind, x, y, len });
+                y -= 36;
+            }
+            this.showBanner("Кортеж!", [255, 210, 80], 120);
+        }
+        if (m.phase === "passing") {
+            for (const v of m.convoy) v.y += bus.speed + 15;
+            if (m.convoy.every((v) => v.y > HEIGHT + 150)) {
+                this.motorcade = null;
+                this.showBanner("Перекрытие снято, движение открыто", GREEN);
+                if (!m.violated) {
+                    this.missionComplete("КОРТЕЖ ПРОЕХАЛ!", 0, 1);
+                    if (this.storyFlags) this.storyFlags.motorcadeOk = true;
+                }
+            }
+        }
+    }
+
     checkCollisions() {
         const bus = this.bus;
         if (bus.air || bus.invuln || bus.landing) return;
         const hb = inflate(bus.rect, -8, -8);
+        for (const v of this.motorcade ? this.motorcade.convoy : []) {   // влез на встречку перед кортежем
+            const r = rect(v.x - 27, v.y, 54, v.len);
+            if (hit(hb, inflate(r, -6, -6))) {
+                this.crash(r);
+                return;
+            }
+        }
         for (const car of this.cars) {
             if (!car.wreck && hit(hb, inflate(car.rect, -6, -6))) {     // по обломкам проезжаем
                 this.crash(car.rect, car);
@@ -601,6 +706,10 @@ class GameUpdate extends GameCore {
     }
 
     finish(how) {
+        if (how === "shift" && this.storyFlags) {          // глава «отработай смену»
+            this.storyFlags.shiftDone = true;
+            storyCheck(this);
+        }
         // Конец рейса: деньги в кошелёк (если не уволили), сохранение. Конец смены — с премией
         this.bonus = how === "shift" ? 300 + 30 * this.stopsServed + (this.complaints === 0 ? 500 : 0) : 0;
         if (how === "shift") this.money += this.bonus;
@@ -677,7 +786,7 @@ class GameUpdate extends GameCore {
         }
         this.spawnObjects();
 
-        if (--this.spawnTimer <= 0) {
+        if (--this.spawnTimer <= 0 && !this.motorcade) {      // при перекрытии новых машин нет
             this.spawnCar();
             // больше полос — больше машин
             const hard = Math.min(1, this.distance / 60000), k = (4 / LANES) / this.route.traffic;
@@ -685,9 +794,11 @@ class GameUpdate extends GameCore {
         }
 
         this.updateCars();
+        this.updateMotorcade();
         this.updatePolice();
         if (this.state !== "play") return;
         this.updateWanted();
+        storyCheck(this);
         this.updateWorldObjects();
         this.updateStops();
         if (this.state !== "play") return;

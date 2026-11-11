@@ -24,6 +24,13 @@ document.querySelectorAll("[data-key]").forEach((btn) => {
     for (const ev of ["pointerup", "pointercancel", "pointerleave"]) btn.addEventListener(ev, set(false));
     btn.addEventListener("contextmenu", (e) => e.preventDefault());
 });
+const hornBtn = document.querySelector("[data-action=horn]");
+hornBtn?.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    hornBtn.classList.add("on");
+    game.honk();
+});
+for (const ev of ["pointerup", "pointercancel", "pointerleave"]) hornBtn?.addEventListener(ev, () => hornBtn.classList.remove("on"));
 document.querySelector("[data-action=pause]")?.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     game.togglePause();

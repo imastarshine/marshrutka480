@@ -32,6 +32,9 @@ const REP_TITLES = [[80, "Легенда района"], [60, "Уважаемы�
 const repTitle = (r) => REP_TITLES.find(([min]) => r >= min)[1];
 // розыск: звёзды гаснут по одной за STAR_DECAY кадров, если не нарушаешь и ДПС не на хвосте
 const MAX_STARS = 5, STAR_DECAY = 60 * 12, POLICE_RETURN = 60 * 14;
+// поймали: взятка (дешевле штрафа, но инспектор может оказаться честным) или отдел (штраф и потеря времени)
+const BRIBE_RATE = 0.6, HONEST_COP = 0.2, STATION_MINUTES = 90;
+const ESCORT_FRAMES = 160, STATION_CARD = 220;   // конвой за машиной ДПС, затем сцена в отделе
 
 const BLOCK = 3000;            // средняя длина квартала; сами улицы стоят неровно (см. gridPos)
 const GREEN_T = 300, YELLOW_T = 70, RED_T = 280;

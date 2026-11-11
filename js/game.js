@@ -74,8 +74,9 @@ class GameCore {
         this.combo = 0;
         this.comboTimer = 0;
         this.nextStopId = 0;
-        this.nextIn = { stop: 700, ramp: 2600, post: 4500, cross: 1400, bridge: 2500, zone: 1500 };
+        this.nextIn = { stop: 700, ramp: 2600, post: 4500, cross: 1400, bridge: 2500, zone: 1500, station: rand(6000, 14000) };
         this.shifts = [];
+        this.stations = [];
         this.openBelow = LANES / 2 - CLOSED;     // открыто полос на сторону ниже всех смен ширины
         this.styleBelow = choice(["tiles", "parking"]);
         this.heli = null;
@@ -99,6 +100,15 @@ class GameCore {
         this.wrongWay = 0;
         this.clock = SHIFT_START * FRAMES_PER_MIN;
         this.repairs = 0;
+        this.hornT = 0;
+        this.hornCool = 0;
+        this.honks = [];        // кадры недавних сигналов — за спам жалуются
+        // кортеж: раз за смену в случайное время всё перекрывают
+        this.motorcade = null;
+        this.motorcadeAt = randint(9 * 60, 16 * 60);
+        this.motorcadeAnnounced = false;
+        // ?kortezh в адресе — кортеж почти сразу (чтобы посмотреть)
+        if (typeof location !== "undefined" && /kortezh/.test(location.search)) this.motorcadeAt = SHIFT_START + 3;
         this.spawnedLines = new Set();
         this.turnT = 0;
         this.turnTotal = 1;
@@ -300,6 +310,39 @@ class GameCore {
         return this.walkers.filter((w) => w.kind === "in" && !w.returning).length;
     }
 
+    // гудок: машина впереди уступает полосу или ускоряется, пешеходы на зебре торопятся.
+    // если сигналить без конца — пассажиры жалуются
+    honk() {
+        if (this.state !== "play" || this.hornCool > 0) return;
+        this.hornCool = 20;
+        this.hornT = 26;
+        hornSound();
+        const bus = this.bus;
+        this.floatText("БИП!", bus.x, bus.y - 24, [255, 180, 80]);
+        for (const car of this.cars) {
+            const gap = bus.y - (car.y + CAR_H);
+            if (car.dir > 0 || car.cop || car.wreck || gap < -20 || gap > 360 || Math.abs(car.x - bus.x) > LANE_W * 0.8) continue;
+            car.hurry = 150;
+            if (car.changing) continue;
+            for (const target of [car.lane + 1, car.lane - 1]) {
+                if (target < ownFirst() || target >= LANES || !this.laneOpen(target, car.y - 300, car.y + CAR_H)) continue;
+                if (!this.laneFreeFor(car, target)) continue;
+                car.targetLane = target;
+                car.blink = 10;
+                break;
+            }
+        }
+        for (const lane of [...this.crosswalks.map((c) => c.peds), ...this.inters.map((i) => i.peds)]) {
+            for (const p of lane.peds) p.speed = Math.max(p.speed, 2.6);
+        }
+        this.honks = (this.honks || []).filter((f) => this.frame - f < 600);
+        this.honks.push(this.frame);
+        if (this.honks.length >= 6 && this.passengers.length) {
+            this.honks = [];
+            this.addComplaints(1, "Пассажиры: хватит сигналить!");
+        }
+    }
+
     // задание выполнено: большая надпись по центру, премия и репутация
     missionComplete(title, money = 0, rep = 0) {
         this.money += money;
@@ -341,6 +384,48 @@ class GameCore {
         this.showBanner(`ДПС: ${reason}! Розыск ${"★".repeat(this.stars)}`, [120, 170, 255]);
         if (this.police && !this.police.leaving) return;
         this.spawnPolice();
+    }
+
+    // поймали: дать взятку (если хватает денег рейса); честный инспектор не возьмёт — тогда в отдел
+    payBribe() {
+        const c = this.caught;
+        if (this.state !== "caught" || this.money < c.bribe) return;
+        if (Math.random() < HONEST_COP) {
+            this.showBanner("Инспектор оказался честным! Едем в отдел", RED, 200);
+            this.addRep(-1);
+            this.goToStation(true);
+            return;
+        }
+        this.money -= c.bribe;
+        this.wanted = 0;
+        this.addRep(-1);
+        this.floatText(`Взятка -${c.bribe} ₽`, this.bus.x, this.bus.y - 30, ORANGE, true);
+        this.showBanner("«Езжайте, и чтобы я вас больше не видел»", [230, 230, 150]);
+        this.caught = null;
+        this.state = "play";
+    }
+
+    // отдел полиции: полный штраф, протокол и полтора часа смены; на 5★ — лишение прав
+    goToStation(attempted = false) {
+        const c = this.caught;
+        if (this.state !== "caught") return;
+        this.wanted = 0;
+        const fine = c.fine * (attempted ? 2 : 1);           // попытка взятки — штраф вдвойне
+        this.money -= fine;
+        if (c.stars >= MAX_STARS) {
+            this.finish("arrested");
+            return;
+        }
+        this.complaints += 1;
+        this.addRep(-1);
+        // сначала едем за машиной ДПС (если впереди не тупик), потом сцена в отделе; часы крутятся там
+        const deadEnd = this.inters.some((i) => !i.arms.straight && i.y > -900);
+        this.station = { t: 0, escort: deadEnd ? 0 : ESCORT_FRAMES, fine, from: this.clock };
+        if (!this.police) this.spawnPolice();
+        this.police.leaving = false;
+        this.caught = null;
+        this.state = "station";
+        if (!deadEnd) this.showBanner("Едем в отдел за машиной ДПС...", [120, 170, 255], ESCORT_FRAMES);
     }
 
     spawnPolice() {
@@ -419,6 +504,7 @@ class GameCore {
             ...this.bridges.map((b) => [b.y - 30, b.h + 60]),
             // на скосах сужений ничего не ставим, внутри участка — можно
             ...this.shifts.map((t) => [t.y - LaneShift.TAPER / 2 - 20, LaneShift.TAPER + 40]),
+            ...this.stations.map((st) => [st.y - 20, PoliceStation.HEIGHT + 40]),
         ];
         return things.every(([y, h]) => top + height + 120 < y || y + h + 120 < top);
     }
@@ -478,6 +564,13 @@ class GameCore {
                 this.shifts.push(new LaneShift(y, from, choice([1, 2, 3].filter((n) => n !== from)), choice(["tiles", "parking"])));
                 this.nextIn.zone = rand(2500, 6000);
             } else this.nextIn.zone = 300;
+        }
+        if (this.nextIn.station <= 0) {
+            const y = -PoliceStation.HEIGHT - 80;
+            if (this.areaFree(y, PoliceStation.HEIGHT)) {
+                this.stations.push(new PoliceStation(y, ROAD_RIGHT - this.closedW(y + PoliceStation.HEIGHT / 2)));
+                this.nextIn.station = rand(12000, 22000);
+            } else this.nextIn.station = 300;
         }
         if (this.nextIn.bridge <= 0) {
             const h = randint(220, 360), y = -h - 80;
@@ -586,10 +679,15 @@ class GameCore {
         ni.t = 0;
         ni.passed = true;
         this.inters = [ni];
-        this.nextIn = { stop: 900, ramp: rand(1500, 3500), post: rand(2500, 6000), cross: rand(900, 2000), bridge: 1500, zone: rand(800, 2500) };
+        this.nextIn = { stop: 900, ramp: rand(1500, 3500), post: rand(2500, 6000), cross: rand(900, 2000), bridge: 1500, zone: rand(800, 2500), station: rand(4000, 12000) };
+        this.stations = [];
         this.shifts = [];
         this.openBelow = LANES / 2 - CLOSED;
         this.styleBelow = choice(["tiles", "parking"]);
+        if (this.motorcade) {              // свернул — перекрытие осталось на старой улице
+            this.motorcade = null;
+            this.showBanner("Объехал перекрытие!", GREEN);
+        }
         ni.closed = CLOSED;
         bus.x = laneCenter(sign > 0 ? LANES - 1 - CLOSED : ownFirst());
         bus.vx = 0;
