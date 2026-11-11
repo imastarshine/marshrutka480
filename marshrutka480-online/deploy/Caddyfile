@@ -1,0 +1,15 @@
+# Caddy running on the HOST, with the game bound to 127.0.0.1:8000.
+# Replace game.example.com. Point its DNS A/AAAA to the server first.
+game.example.com {
+    encode zstd gzip
+    request_body {
+        max_size 16KB
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+    reverse_proxy 127.0.0.1:8000
+}

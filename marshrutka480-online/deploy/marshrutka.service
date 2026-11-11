@@ -1,0 +1,23 @@
+# Install project + venv under /opt/marshrutka480, create user marshrutka.
+[Unit]
+Description=Marshrutka 480 multiplayer
+After=network.target
+
+[Service]
+User=marshrutka
+Group=marshrutka
+WorkingDirectory=/opt/marshrutka480
+EnvironmentFile=/opt/marshrutka480/.env
+ExecStart=/opt/marshrutka480/.venv/bin/python run.py --host 127.0.0.1 --port 8000 --proxy-ips 127.0.0.1
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/marshrutka480/data
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
