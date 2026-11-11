@@ -159,7 +159,7 @@ class CityWorldRenderer {
                 const [x,y]=this.actorPosition(car);
                 if (!this.visible(camera,x,y)) continue;
                 ctx.save(); ctx.globalAlpha=car.alpha??1; ctx.translate(x,y); ctx.rotate(car.angle);
-                drawCarBody(rect(-(car.w||50)/2,-(car.h||92)/2,car.w||50,car.h||92),car.color||[145,155,165],car.braking);
+                CityRoadEvents.drawVehicle(car,Math.floor((Date.now()+(session?.active?session.clockOffset:0))/1000*60));
                 ctx.restore(); if(session)session.drawnTraffic++;
             }
             game.cityCrossings.drawPeople(game,layer,camera.bounds);
@@ -207,6 +207,7 @@ class CityWorldRenderer {
             for (const [edge] of entries) { this.stopPlatforms(game,edge); this.controls(game,edge); }
             for(const [edge] of entries)this.lamps(edge,camera.bounds);
             game.cityEvents?.draw(entries.map(([edge])=>edge),game.frame,camera.bounds);
+            game.cityEvents?.drawClosures(game,layer,camera.bounds);
             drawActors(layer);
         }
         ctx.restore();

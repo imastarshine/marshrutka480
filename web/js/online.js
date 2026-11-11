@@ -30,6 +30,7 @@ class CitySession {
     }
     get authoritativeTraffic() { return this.active && this.authoritativeTrafficEnabled; }
     clear() {
+        this.boundGame?.cityEvents?.resetEscort();
         if (this.boundGame) { this.boundGame.serverWorldEnabled = false; this.boundGame.serverCars = []; }
         this.state = null; this.previous.clear(); this.samples.clear(); this.buses.clear(); this.horns.clear();
         this.serverPerfOffset = null; this.lastRenderTime = -Infinity;
@@ -41,6 +42,7 @@ class CitySession {
         if (state.room?.mode !== "city") return;
         const now = performance.now();
         if (this.state && (this.state.room.code !== state.room.code || this.state.seed !== state.seed || this.state.world?.id !== state.world?.id)) {
+            this.boundGame?.cityEvents?.resetEscort();
             this.samples.clear(); this.serverPerfOffset = null; this.lastRenderTime = -Infinity;
             this.trafficSamples.clear(); this.pedestrianSamples.clear(); this.trafficFirstSeen.clear(); this.authoritativeTrafficEnabled = false;
         }

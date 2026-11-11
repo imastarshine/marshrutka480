@@ -19,6 +19,7 @@ import random
 import time
 
 from .pedestrians import PedestrianWorld
+from .motorcade import WorldMotorcade
 
 CELL = 4000.0
 SNAPSHOT_INNER, SNAPSHOT_OUTER = 3000.0, 3800.0
@@ -142,6 +143,8 @@ class Reservation:
     remaining: float
     acquired: float = 0.0
     entered: bool = False
+    convoy_id: str | None = None
+    direction: tuple = (0.0, -1.0)
 
 
 class TrafficGraph:
@@ -408,6 +411,10 @@ class NPC:
     heading: float | None = None
     yield_pending: bool = False
     signal_clearance_group: int | None = None
+    kind: str = "car"
+    w: float = CAR_WIDTH
+    h: float = CAR_LENGTH
+    convoy_id: str | None = None
 
 
 class SharedTraffic:
@@ -433,6 +440,7 @@ class SharedTraffic:
         self._gate_requests = {}
         self._snapshot_members = {}
         self._snapshot_seen = {}
+        self.motorcade = WorldMotorcade(self, NPC)
 
     def _body(self, npc):
         if npc.connector:
@@ -502,6 +510,8 @@ class SharedTraffic:
                    for px, py in self._observer_cells.get((bx, by), {}).values())
 
     def _choose_exit(self, npc):
+        if npc.convoy_id:
+            return self.motorcade.choose((npc.edge, npc.reverse))
         return self._choose_from(npc.edge, npc.reverse)
 
     def _choose_from(self, incoming_id, incoming_reverse):
@@ -530,7 +540,7 @@ class SharedTraffic:
         distance = remaining + sum(self.graph.edges[edge].length for edge, _ in npc.planned_edges)
         while distance < LOOKAHEAD and len(npc.planned_edges) < 24:
             previous = npc.planned_edges[-1] if npc.planned_edges else (npc.edge, npc.reverse)
-            following = self._choose_from(*previous)
+            following = self.motorcade.choose(previous) if npc.convoy_id else self._choose_from(*previous)
             if following is None:
                 break
             npc.planned_edges.append(following)
@@ -672,14 +682,14 @@ class SharedTraffic:
             if distance > LOOKAHEAD or index + 1 >= len(path):
                 break
             junction = graph.junction(*incoming)
-            room = distance - junction.center_stop
+            room = distance - junction.center_stop - (npc.h - CAR_LENGTH) / 2
             if junction.controlled and room >= -.01 and not self._clearing(npc, junction, room):
                 edge = graph.edges[incoming[0]]
                 _, _, dx, dy = graph.position(incoming[0], 0 if incoming[1] else edge.length, incoming[1])
                 return {"npc": npc, "junction": junction, "incoming": incoming,
                         "outgoing": path[index + 1], "index": index, "path": path,
                         "distance": distance, "room": max(0, room), "direction": (dx, dy),
-                        "priority": -1 if npc.yield_pending else junction.priority}
+                        "priority": (3 if npc.convoy_id else 0) + (-1 if npc.yield_pending else junction.priority)}
             distance += graph.edges[path[index + 1][0]].length
         return None
 
@@ -697,12 +707,12 @@ class SharedTraffic:
         junction = self.graph.junction(npc.edge, npc.reverse)
         edge = self.graph.edges[npc.edge]
         remaining = npc.offset if npc.reverse else edge.length - npc.offset
-        if junction.controlled and remaining < junction.center_stop - .01:
+        if junction.controlled and remaining < junction.center_stop + (npc.h - CAR_LENGTH) / 2 - .01:
             reservation = self._reservations.get(npc.id)
             if reservation and reservation.node == junction.node:
                 reservation.entered = True
             npc.junction_clearance = max(npc.junction_clearance,
-                                         remaining + junction.cross_width / 2 + CAR_LENGTH / 2)
+                                         remaining + junction.cross_width / 2 + npc.h / 2)
             if junction.signal:
                 npc.signal_clearance_group = junction.signal_group
 
@@ -711,12 +721,12 @@ class SharedTraffic:
         incoming, outgoing = request["incoming"], request["outgoing"]
         lane = self._exit_lane(npc.lane, incoming, outgoing)
         _, cut_out = self._connector_cuts(incoming, outgoing)
-        required = max(CAR_LENGTH + 160, cut_out + CAR_LENGTH + 110)
+        required = max(npc.h + 160, cut_out + npc.h + 110)
         distance = 0.0
         for following in request["path"][request["index"] + 1:]:
             lane = self._exit_lane(lane, incoming, following)
             for progress, other in groups.get((*following, lane), ()):
-                if other.id != npc.id and distance + progress < required:
+                if other.id != npc.id and not (npc.convoy_id and other.convoy_id == npc.convoy_id) and distance + progress < required:
                     return False
             distance += graph.edges[following[0]].length
             if distance >= required:
@@ -740,7 +750,7 @@ class SharedTraffic:
     def _junction_radius(self, request):
         return max(request["junction"].cross_width / 2,
                    self.graph.edges[request["incoming"][0]].base_lanes * LANE_WIDTH / 2,
-                   self.graph.edges[request["outgoing"][0]].base_lanes * LANE_WIDTH / 2) + CAR_LENGTH * 1.5
+                   self.graph.edges[request["outgoing"][0]].base_lanes * LANE_WIDTH / 2) + request["npc"].h * 1.5
 
     def _near_requests(self, request, cells):
         x, y = self.graph.nodes[request["junction"].node][:2]
@@ -761,12 +771,16 @@ class SharedTraffic:
             reservation = self._reservations.get(npc_id)
             if reservation is None:
                 continue
+            if request["npc"].convoy_id and reservation.convoy_id == request["npc"].convoy_id:
+                continue
             reach = radius + reservation.radius
             if math.hypot(x - reservation.x, y - reservation.y) < reach and self.graph.nearby_connected(junction.node, reservation.node, reach):
                 return True
         return False
 
     def _yields_to(self, request, other):
+        if request["npc"].convoy_id and request["npc"].convoy_id == other["npc"].convoy_id:
+            return False
         a, b = request["junction"], other["junction"]
         if other["priority"] != request["priority"]:
             return other["priority"] > request["priority"]
@@ -877,7 +891,8 @@ class SharedTraffic:
         _, cut_out = self._connector_cuts(request["incoming"], request["outgoing"])
         self._reservations[request["npc"].id] = Reservation(junction.node, x, y,
                                                           self._junction_radius(request),
-                                                          request["distance"] + cut_out + CAR_LENGTH * 2, self.elapsed)
+                                                          request["distance"] + cut_out + request["npc"].h * 2, self.elapsed,
+                                                          convoy_id=request["npc"].convoy_id, direction=request["direction"])
         self._reservation_cells[(math.floor(x / 800), math.floor(y / 800))].add(request["npc"].id)
 
     def _pose(self, npc):
@@ -885,7 +900,7 @@ class SharedTraffic:
         return {"id": npc.id, "wx": round(x, 3), "wy": round(y, 3),
                 "angle": round(math.atan2(dx, -dy) if npc.connector or npc.heading is None else npc.heading, 6), "lateral": 0, "pose_space": "world",
                 "speed": round(npc.speed / 60, 3), "color": npc.color, "braking": npc.braking,
-                "w": CAR_WIDTH, "h": CAR_LENGTH, "edge": self.graph.edges[npc.edge].id, "reverse": npc.reverse}
+                "w": npc.w, "h": npc.h, "kind": npc.kind, "convoy_id": npc.convoy_id, "edge": self.graph.edges[npc.edge].id, "reverse": npc.reverse}
 
     def _spawn(self, cell, counts):
         ranges = self.graph.cells.get(cell, ())
@@ -953,7 +968,7 @@ class SharedTraffic:
             x, y, _, _ = self._body(npc)
             counts[self._cell(x, y)] += 1
             self._occupancy[(npc.edge, npc.reverse, npc.lane)].append(npc.offset)
-        budget = min(32, self.max_npcs - len(self.npcs))
+        budget = min(32, self.max_npcs - (7 if self.max_npcs>=7 and not self.motorcade.active else 0) - len(self.npcs))
         cells = sorted(active)
         self.random.shuffle(cells)
         for cell in cells:
@@ -1025,6 +1040,7 @@ class SharedTraffic:
         if self.elapsed >= self._activation_at:
             self._activate()
             self._activation_at = self.elapsed + .5
+        self.motorcade.step()
         groups = defaultdict(list)
         for npc in self.npcs.values():
             length = self.graph.edges[npc.edge].length
@@ -1033,7 +1049,7 @@ class SharedTraffic:
             # Queue membership follows its physical lateral position, rather
             # than treating the old lane number as an invisible reservation.
             for lane in range(self.graph.lanes(npc.edge, npc.reverse)):
-                if abs(npc.lateral - LANE_WIDTH * (lane + .5)) < 62:
+                if abs(npc.lateral - LANE_WIDTH * (lane + .5)) < (npc.w + LANE_WIDTH) / 2:
                     groups[(npc.edge, npc.reverse, lane)].append((progress, npc))
         leaders = {}
         for key, group in groups.items():
@@ -1059,7 +1075,7 @@ class SharedTraffic:
         vehicles = []
         for npc in self.npcs.values():
             px, py, _, _ = self._body(npc)
-            vehicles.append((px, py, npc.speed, CAR_WIDTH, CAR_LENGTH, self.graph.edges[npc.edge].layer))
+            vehicles.append((px, py, npc.speed, npc.w, npc.h, self.graph.edges[npc.edge].layer))
         for pose in self._poses:
             px, py = self._observer_point(pose)
             vehicles.append((px, py, abs(pose.get("speed", 0)) * 60, 70, 180, self.graph.edge_layers.get(pose.get("edge"))))
@@ -1095,7 +1111,7 @@ class SharedTraffic:
             leader = leaders.get(npc.id)
             progress = edge.length - npc.offset if npc.reverse else npc.offset
             if leader:
-                gap = leader[0] - progress - CAR_LENGTH
+                gap = leader[0] - progress - (npc.h + leader[1].h) / 2
                 target = min(target, max(0, leader[1].speed + (gap - 160) * 1.2))
                 max_move = max(0, gap - 45)
             # Follow the physical queue over all short OSM edges. A planned
@@ -1111,13 +1127,13 @@ class SharedTraffic:
                 for lane in future_lanes:
                     next_leader = next((item for item in groups.get((*following, lane), ()) if item[1].id != npc.id), None)
                     if next_leader:
-                        gap = distance_ahead + next_leader[0] - CAR_LENGTH
+                        gap = distance_ahead + next_leader[0] - (npc.h + next_leader[1].h) / 2
                         target = min(target, max(0, next_leader[1].speed + (gap - 160) * 1.2))
                         max_move = min(max_move, max(0, gap - 45))
                 distance_ahead += self.graph.edges[following[0]].length
                 incoming = following
             if not npc.next_edge:
-                room = max(0, remaining - CAR_LENGTH / 2 - BUMPER_GAP)
+                room = max(0, remaining - npc.h / 2 - BUMPER_GAP)
                 target = min(target, math.sqrt(2 * braking * room))
                 max_move = min(max_move, room)
             request = self._gate_requests.get(npc.id)
@@ -1136,7 +1152,7 @@ class SharedTraffic:
                 max_move = min(max_move, room)
             self._refresh_clearance(npc)
             for _, distance_ahead, junction in self._approaches(npc, remaining):
-                room = distance_ahead - junction.center_stop
+                room = distance_ahead - junction.center_stop - (npc.h - CAR_LENGTH) / 2
                 # Once the front has crossed a line, clear that junction even
                 # if its light changes. At the stopping boundary keep waiting.
                 if not npc.connector and room >= -.01 and not self._clearing(npc, junction, room) and self.graph.red(junction, self.seed, world_frame):
@@ -1156,7 +1172,7 @@ class SharedTraffic:
                             gap = max(0, forward - 180)
                             target = min(target, math.sqrt(2 * braking * gap))
                             max_move = min(max_move, gap)
-            pedestrian_room = self.pedestrians.stop_room(x, y, dx, dy, edge.layer)
+            pedestrian_room = self.pedestrians.stop_room(x, y, dx, dy, edge.layer, npc.h / 2)
             if math.isfinite(pedestrian_room):
                 target = min(target, math.sqrt(2 * braking * pedestrian_room))
                 max_move = min(max_move, pedestrian_room)

@@ -20,6 +20,7 @@ class LocalCityTraffic {
         this.spawnPool = [];
         this.poolCenter = null;
         this.cap = 80;
+        this.motorcade = new LocalMotorcade(this);
         for (const relation of graph.data.sourceRestrictions || []) {
             const tags = relation.tags || {}, except = (tags.except || "").split(";");
             if (except.some(value => ["motorcar", "motor_vehicle", "vehicle"].includes(value))) continue;
@@ -149,6 +150,7 @@ class LocalCityTraffic {
             return plan;
         };
         if (!forced && car.next) return preserveLane(car.next);
+        if (!forced && car.convoyId) forced = this.motorcade.route.get(key) || null;
         if (!forced && car.plans?.has(key)) { car.next = car.plans.get(key); return preserveLane(car.next); }
         const choices = this.exits(car.edge, car.reverse), incoming = this.graph.direction(car.edge, car.reverse,
             car.reverse ? 0 : car.edge.length);
@@ -184,6 +186,7 @@ class LocalCityTraffic {
         car.next = { ...next, lane, incomingLane, laneTurn, control, cutIn, cutOut,
             entry: car.edge.length - cutIn, group: groupNode?.id || control.nodeId, reservation };
         car.plans?.set(key, car.next);
+        if(car.convoyId)this.motorcade.route.set(key,{edge:car.next.edge,reverse:car.next.reverse});
         return car.next;
     }
 
@@ -331,7 +334,7 @@ class LocalCityTraffic {
     exitSpace(car, next) {
         const point = this.lanePosition(next.edge, next.reverse, next.cutOut, this.lateral(next.edge, next.reverse, next.lane, next.cutOut));
         for (const other of this.cars.values()) {
-            if (other === car) continue;
+            if (other === car || car.convoyId&&car.convoyId===other.convoyId) continue;
             if (other.edge.id === next.edge.id && other.reverse === next.reverse &&
                 Math.abs(other.lateral - this.lateral(next.edge, next.reverse, next.lane, next.cutOut)) < 55) {
                 const distance = this.progress(other) - next.cutOut;
@@ -355,7 +358,7 @@ class LocalCityTraffic {
             if (!next || seen.has(key)) return null;
             seen.add(key);
             if (next.reservation) return { subject, next, distance: distance + next.entry,
-                waitDistance: distance + subject.edge.length - next.control.stopLine - 52, key };
+                waitDistance: distance + subject.edge.length - next.control.stopLine - (car.h||92)/2 - 6, key };
             distance += subject.edge.length;
             subject = { ...car, edge: next.edge, reverse: next.reverse, lane: next.lane, next: null };
         }
@@ -402,8 +405,8 @@ class LocalCityTraffic {
             const lane = Math.min(this.laneCount(car.edge, car.reverse) - 1, next.incomingLane);
             const laneReady = (!next.laneTurn || !car.changing) && car.lane === lane &&
                 Math.abs(car.lateral - this.lateral(car.edge, car.reverse, lane, this.progress(car))) < 8;
-            const priority = control.stop || control.yield || car.yieldPending ? -1 : car.edge.osmTags?.priority_road === "designated" ||
-                car.edge.osmTags?.junction === "roundabout" ? 1 : 0;
+            const priority = (car.convoyId?3:0) + (control.stop || control.yield || car.yieldPending ? -1 : car.edge.osmTags?.priority_road === "designated" ||
+                car.edge.osmTags?.junction === "roundabout" ? 1 : 0);
             groups.get(next.group).push({ car, next, intent, since: this.arrivals.get(key), priority,
                 eligible: ready && served && laneReady && !this.crossings?.blocked.some(crossing=>crossing.id===next.control.nodeId) && this.exitSpace(car, next), dir: next.control.dir });
         }
@@ -432,9 +435,9 @@ class LocalCityTraffic {
             }));
             if (!winner) continue;
             const zone = { node: group, radius: winner.next.control.width / 2 + 140 };
-            if ([...this.reservations.values()].some(reservation => reservation.owner !== winner.car.id && this.zonesOverlap(zone, reservation.zone))) continue;
+            if ([...this.reservations.values()].some(reservation => reservation.owner !== winner.car.id && !(winner.car.convoyId&&reservation.convoyId===winner.car.convoyId) && this.zonesOverlap(zone, reservation.zone))) continue;
             const arc = this.makeArc(winner.intent.subject, winner.next);
-            this.reservations.set(group, { owner: winner.car.id, acquired: this.elapsed, entered: false,
+            this.reservations.set(group, { owner: winner.car.id, convoyId:winner.car.convoyId||null, acquired: this.elapsed, entered: false,
                 control: winner.next.control, controlKey: winner.intent.key, zone,
                 releaseAt: winner.car.travel + Math.max(0, winner.intent.distance) + arc.length + 100 });
         }
@@ -443,6 +446,11 @@ class LocalCityTraffic {
     releaseReservations() {
         for (const [group, reservation] of this.reservations) {
             const owner = this.cars.get(reservation.owner);
+            if(reservation.convoyId){
+                const node=this.graph.nodes.get(reservation.zone.node),radius=reservation.zone.radius+500;
+                if(node&&[...this.cars.values()].some(car=>car.convoyId===reservation.convoyId&&Math.hypot(car.pose.x-node.x,car.pose.y-node.y)<radius))continue;
+                this.reservations.delete(group);continue;
+            }
             const red = owner && !reservation.entered && reservation.control.signal &&
                 this.signalState(reservation.control) !== "green" && !owner.committed.has(reservation.controlKey);
             if (!owner || owner.travel >= reservation.releaseAt || red || (!reservation.entered && this.elapsed - reservation.acquired > 5)) {
@@ -457,15 +465,15 @@ class LocalCityTraffic {
             const dx = point.x - car.pose.x, dy = point.y - car.pose.y;
             const along = dx * car.pose.dir[0] + dy * car.pose.dir[1];
             const side = -car.pose.dir[1] * dx + car.pose.dir[0] * dy;
-            if (along <= 0 || along > 650 || Math.abs(side) > (50 + width) / 2 + 5) return;
+            if (along <= 0 || along > 650 || Math.abs(side) > ((car.w||50) + width) / 2 + 5) return;
             if (point.dir && car.pose.dir[0] * point.dir[0] + car.pose.dir[1] * point.dir[1] < .35 && along > 150) return;
-            const gap = along - (92 + height) / 2;
+            const gap = along - ((car.h||92) + height) / 2;
             space = Math.min(space, Math.max(0, gap - 22));
             target = Math.min(target, Math.max(0, speed + (gap - 55 - car.speed * 11) * .045));
         };
         for (const other of this.cars.values()) {
             if (other === car || this.geometry.layer(other.edge) !== this.geometry.layer(car.edge)) continue;
-            consider(other.pose, other.speed);
+            consider(other.pose, other.speed,other.w||50,other.h||92);
         }
         if (player && player.layer === this.geometry.layer(car.edge)) consider(player, player.speed, player.w, player.h);
         return { target, space };
@@ -493,15 +501,15 @@ class LocalCityTraffic {
             car.offset += car.reverse ? -amount : amount; car.travel += amount; left -= amount;
             if (amount + 1e-7 < room) break;
             const reservation = this.reservations.get(next.group);
-            if (next.reservation && reservation?.owner !== car.id) break;
+            if (next.reservation && !(reservation?.owner === car.id || car.convoyId&&reservation?.convoyId===car.convoyId)) break;
             if (next.laneTurn && (car.lane !== next.incomingLane || car.changing ||
                 Math.abs(car.lateral - this.lateral(car.edge, car.reverse, next.incomingLane, this.progress(car))) > 8)) break;
             car.arc = this.makeArc(car, next);
-            if (reservation?.owner === car.id) {
+            if (reservation?.owner === car.id || car.convoyId&&reservation?.convoyId===car.convoyId) {
                 reservation.entered = true; reservation.releaseAt = car.travel + car.arc.length + 100;
             }
             const ahead = this.controlAhead(car);
-            const line = ahead ? ahead.distance - ahead.control.stopLine - 46 : Infinity;
+            const line = ahead ? ahead.distance - ahead.control.stopLine - (car.h||92)/2 : Infinity;
             if (ahead?.control.signal && line >= -2 && line <= next.cutIn + next.cutOut &&
                 this.signalState(ahead.control) === "green") car.committed.add(ahead.key);
         }
@@ -523,6 +531,7 @@ class LocalCityTraffic {
             car.far = distance > 5500 ? car.far + dt : 0;
             if (distance > 5500 && (car.far > 8 || car.age > 180)) this.cars.delete(id);
         }
+        this.motorcade.step(game);
         this.crossings=game.cityCrossings;
         this.releaseReservations(); this.requests(now);
         for (const car of this.cars.values()) {
@@ -562,7 +571,7 @@ class LocalCityTraffic {
                 if (Math.abs(next.angle) > .35) target = Math.min(target, 2.4 + entryDistance * .015);
                 const junction = this.reservationIntent(car);
                 const reservation = junction ? this.reservations.get(junction.next.group) : null;
-                if (junction && reservation?.owner !== car.id) {
+                if (junction && !(reservation?.owner === car.id || car.convoyId&&reservation?.convoyId===car.convoyId)) {
                     let room = Math.max(0, junction.waitDistance);
                     if (room < entryDistance + next.cutIn + next.cutOut) room = Math.min(room, entryDistance);
                     maxMove = Math.min(maxMove, room);
@@ -570,7 +579,7 @@ class LocalCityTraffic {
                 }
                 const ahead = this.controlAhead(car);
                 if (ahead) {
-                    const control = ahead.control, distance = ahead.distance - control.stopLine - 46;
+                    const control = ahead.control, distance = ahead.distance - control.stopLine - (car.h||92)/2;
                     if (control.stop || control.yield) car.yieldPending = true;
                     const phase = this.signalState(control, now);
                     if (control.signal && phase === "green" && distance < Math.max(22, car.speed * 2)) car.committed.add(ahead.key);
@@ -592,7 +601,7 @@ class LocalCityTraffic {
                     }
                 }
             } else if (car.arc) target = Math.min(target, Math.abs(car.arc.next.angle) > .35 ? 2.4 : car.cruise);
-            const pedestrianRoom = game.cityCrossings?.stopRoom(car.pose.x,car.pose.y,car.pose.dir[0],car.pose.dir[1],this.geometry.layer(car.edge)) ?? Infinity;
+            const pedestrianRoom = game.cityCrossings?.stopRoom(car.pose.x,car.pose.y,car.pose.dir[0],car.pose.dir[1],this.geometry.layer(car.edge),(car.h||92)/2) ?? Infinity;
             if(Number.isFinite(pedestrianRoom)){
                 target=Math.min(target,Math.sqrt(2*.2*pedestrianRoom));maxMove=Math.min(maxMove,pedestrianRoom);
             }
@@ -613,7 +622,8 @@ class LocalCityTraffic {
         }
         this.spawnCredit = Math.min(24, this.spawnCredit + dt * 8);
         let attempts = 0;
-        while (this.cars.size < this.cap && this.spawnCredit >= 1 && attempts++ < 8) {
+        const ordinaryCap=this.motorcade.active||this.cap<7?this.cap:this.cap-7;
+        while (this.cars.size < ordinaryCap && this.spawnCredit >= 1 && attempts++ < 8) {
             this.spawnCredit -= 1;
             if (!this.spawn(game, center)) break;
         }
@@ -624,7 +634,7 @@ class LocalCityTraffic {
             const outgoing = car.arc && car.arc.at > car.arc.length / 2 ? car.arc.next : null;
             return { id: car.id, wx: car.pose.x, wy: car.pose.y, angle: Math.atan2(car.pose.dir[0], -car.pose.dir[1]),
                 lateral: 0, pose_space: "world", edge: outgoing?.edge.id || car.edge.id,
-                reverse: outgoing ? outgoing.reverse : car.reverse, w: 50, h: 92, color: car.color,
+                reverse: outgoing ? outgoing.reverse : car.reverse, w: car.w||50, h: car.h||92, kind:car.kind||"car",convoy_id:car.convoyId||null,color: car.color,
                 speed: car.speed, braking: car.braking, alpha: 1, collidable: true };
         });
     }

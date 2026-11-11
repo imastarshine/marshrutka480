@@ -7,7 +7,7 @@
 
 ## HTTP
 
-- `GET /api/health` → `{ok:true,version:"2.3.0-beta.4",protocol:1,features:[...]}`.
+- `GET /api/health` → `{ok:true,version:"2.3.0-beta.6",protocol:1,features:[...]}`.
 - `POST /api/auth/guest`, тело `{}` → `{token,expires_at,user:{id,username}}`;
   сервер выдаёт уникальный гостевой позывной без пароля. Не более 30 выдач за 10 минут с IP.
 - `POST /api/auth/register`, `POST /api/auth/login`, тело `{username,password}` →
@@ -116,6 +116,15 @@ results:[],ranked:false}`.
 из того же временного буфера, что и машины. При обрыве связи локальные люди
 не подменяют последнее серверное состояние. Прохожие создаются у бордюров
 только исходных переходов, без случайных переходов посреди улицы.
+
+В beta.6 `traffic` дополнительно содержит `kind` (`car`, `police`,
+`limousine`, `ambulance`) и `convoy_id` (строка или `null`). Размеры `w/h`
+соответствуют кузову; очереди и стоп-линии учитывают длину машины.
+`motorcade` в общем снимке содержит `{phase,starts_in,closed_nodes}` до появления
+либо `{id,phase:"passing",vehicles:[NPC_ID],closed_nodes:[{node,wx,wy,width,angle,layer}]}`.
+Эта информация рассчитывается один раз в комнате и не фильтруется по получателю.
+`closed_nodes` — фактически занятые сопровождением перекрёстки, а не случайные
+перекрытия перед отдельным игроком. Пешеходы сохраняют приоритет безопасности.
 
 `CITY_PLAYER` содержит `id,username,color,number,connected,pose_time` и поля pose;
 `pose_time` — серверное время последнего принятого положения, Unix-миллисекунды.

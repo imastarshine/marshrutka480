@@ -167,6 +167,10 @@
         n.postHits=[];
         if(scale>.003)for(const post of this.cityEvents?.posts||[]){const [sx,sy]=toMap(post.x,post.y);if(!inside(sx,sy,area))continue;
             fillRect(sx-7,sy-7,14,14,[48,114,211],.95,3);text("Д",sx,sy,WHITE,10,{bold:true,align:"center",base:"middle"});n.postHits.push({...post,sx,sy});}
+        let escortLabel=false;
+        for(const car of this.cityTrafficActors())if(car.convoy_id){const [sx,sy]=toMap(car.wx,car.wy);if(!inside(sx,sy,area))continue;
+            circle(sx,sy,6,[15,28,38]);ring(sx,sy,5,car.kind==="limousine"?YELLOW:[100,175,255],2);
+            if(!escortLabel){text("Кортеж",sx+9,sy-15,[125,191,255],11,{bold:true,shadow:true});escortLabel=true;}}
         window.citySession?.drawMinimap(this,{bx:area.x,by:area.y,size:area.w,width:area.w,height:area.h,toMap,cx:area.x+area.w/2,cy:area.y+area.h/2,overview:true});
         const p=this.cityWorldPose,[x,y]=toMap(p.wx,p.wy);circle(x,y,9,[12,22,29]);ring(x,y,9,YELLOW,2);
         ctx.save();ctx.translate(x,y);ctx.rotate(p.angle);poly([[0,-11],[-6,7],[0,3],[6,7]],YELLOW);ctx.restore();ctx.restore();

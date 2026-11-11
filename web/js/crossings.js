@@ -73,11 +73,11 @@ class CityCrossings {
             if(!active.has(id)&&!state.walkers.length)this.states.delete(id);
         }
     }
-    stopRoom(x,y,dx,dy,layer) {
+    stopRoom(x,y,dx,dy,layer,halfLength=46) {
         let room=Infinity;
         for(const crossing of this.blocked){
             if(crossing.layer!==layer||Math.abs(dx*crossing.dir[0]+dy*crossing.dir[1])<.65)continue;
-            const vx=crossing.x-x,vy=crossing.y-y,ahead=vx*dx+vy*dy,side=Math.abs(-dy*vx+dx*vy),gap=ahead-122;
+            const vx=crossing.x-x,vy=crossing.y-y,ahead=vx*dx+vy*dy,side=Math.abs(-dy*vx+dx*vy),gap=ahead-76-halfLength;
             if(gap>=-.01&&side<crossing.width+30&&ahead<1400)room=Math.min(room,Math.max(0,gap));
         }
         return room;

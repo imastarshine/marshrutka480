@@ -87,6 +87,7 @@ class CityRoom:
                           "traffic_tick": self.tick},
                 "traffic": self.traffic.snapshot(),
                 "pedestrians": self.traffic.pedestrians.snapshot(),
+                "motorcade": self.traffic.motorcade.snapshot(),
                 "traffic_server_time": self.world_time,
                 "tick": self.tick, "results": [], "ranked": False}
 
