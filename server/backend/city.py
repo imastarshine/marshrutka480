@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 
 from .config import Settings
+from .traffic import SharedTraffic
 
 COLORS = ("#f5c81e", "#59cbe8", "#e798ff", "#8fe388", "#ff9578", "#9daaff", "#f2a5c6", "#faf5dd")
 
@@ -53,7 +54,9 @@ class CityRoom:
         self.status = "running"
         self.round_id = secrets.token_hex(12)
         self.seed = secrets.randbelow(2**31)
+        self.traffic = SharedTraffic(self.seed)
         self.started_at = time.time()
+        self.world_time = self.started_at
         self.last_active = time.monotonic()
         self.persisted, self.results, self.tick = True, [], 0
 
@@ -73,11 +76,16 @@ class CityRoom:
 
     def step(self, dt):
         self.tick += 1
+        self.world_time = time.time()
+        self.traffic.step(dt, self.players.values())
 
-    def snapshot(self):
+    def snapshot(self, user_id=None):
         return {"type": "state", "room": self.info(),
                 "players": [p.snapshot() for p in self.players.values() if not p.abandoned],
-                "seed": self.seed, "server_time": time.time(), "started_at": self.started_at,
+                "seed": self.seed, "server_time": self.world_time, "started_at": self.started_at,
+                "world": {"authoritative_traffic": True, "version": 1},
+                "traffic": self.traffic.snapshot_for(self.players.get(user_id)),
+                "traffic_server_time": self.world_time,
                 "tick": self.tick, "results": [], "ranked": False}
 
     def spawn(self, user_id):

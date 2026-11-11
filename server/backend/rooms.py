@@ -187,10 +187,24 @@ class RoomManager:
             if conn.room_code == code:
                 conn.send(payload)
 
+    def broadcast_city(self, room: CityRoom) -> None:
+        # All drivers share one world tick. Only distant traffic is omitted from
+        # an individual packet; overlapping views contain the same actor IDs.
+        base = room.snapshot()
+        base.pop("traffic")
+        prefix = json.dumps(base, ensure_ascii=False, separators=(",", ":"))[:-1] + ',"traffic":'
+        for conn in list(self.connections.values()):
+            if conn.room_code == room.code:
+                traffic = room.traffic.snapshot_for(room.players.get(conn.user_id))
+                conn.send(prefix + json.dumps(traffic, ensure_ascii=False, separators=(",", ":")) + "}")
+
     async def run(self) -> None:
         tick = 0
+        previous_tick = time.monotonic()
         while not self.closed:
             before = time.monotonic()
+            city_dt = min(.25, max(.001, before - previous_tick))
+            previous_tick = before
             tick += 1
             for room in list(self.rooms.values()):
                 for p in list(room.players.values()):
@@ -199,7 +213,7 @@ class RoomManager:
                             self.remove(p.id,room.code)
                 if room.code not in self.rooms:
                     continue
-                room.step(0.05)
+                room.step(city_dt if isinstance(room, CityRoom) else 0.05)
                 if room.status=="finished" and not room.persisted:
                     try:
                         await asyncio.to_thread(self.db.save_results,room.round_id,room.results)
@@ -207,7 +221,10 @@ class RoomManager:
                     except Exception:
                         logger.exception("Could not persist completed round %s",room.round_id)
                 if tick % 2 == 0:
-                    self.broadcast(room.code,room.snapshot())
+                    if isinstance(room, CityRoom):
+                        self.broadcast_city(room)
+                    else:
+                        self.broadcast(room.code,room.snapshot())
             if tick % 20 == 0:
                 now = time.time()
                 for conn in list(self.connections.values()):

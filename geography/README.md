@@ -9,6 +9,8 @@
 | `source/irkutsk-osm-2026-11-11.json.gz` | Исходные маршрутные отношения и дополнительные данные для их восстановления |
 | `source/authoritative_stop_order.json` | Названия и последовательности остановок шести линий по 2ГИС |
 | `source/2gis_stop_platforms.json` | Координаты уточнённых платформ со ссылками на видимые карточки 2ГИС |
+| `source/verified-route-corridors.json.gz` | Проверенные коридоры шести маршрутов для повторного объединения с городской сетью |
+| `../server/assets/irkutsk-traffic.json.gz` | Компактная производная сеть для общего серверного трафика, также ODbL |
 
 ## Область выгрузки
 
@@ -44,6 +46,7 @@ python scripts/download_irkutsk_roads.py
 
 ```bash
 python scripts/import_irkutsk_osm.py
+python scripts/export_traffic_graph.py
 ```
 
 Объединять дороги по близости координат запрещено в логике импорта:

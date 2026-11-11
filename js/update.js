@@ -4,6 +4,11 @@
 class GameUpdate extends GameCore {
     // --- обновление ---
     updateCars() {
+        if (this.serverTrafficActive) {
+            this.serverCars = window.citySession.trafficProxies(this);
+            return;
+        }
+        this.serverCars = [];
         const bus = this.bus;
         // маршрутка в кармане остановки: правая полоса за ней пропускает её на выезд
         const rightLane = LANES - 1 - this.closedLanesAt(bus.centerY);
@@ -178,6 +183,7 @@ class GameUpdate extends GameCore {
     }
 
     updatePolice() {
+        if (this.serverTrafficActive) return;
         const p = this.police;
         if (!p) return;
         const bus = this.bus;
@@ -477,6 +483,7 @@ class GameUpdate extends GameCore {
     updateAir() {
         const bus = this.bus;
         if (!bus.air) return;
+        for (const car of this.serverCars || []) if (hit(car.rect, bus.rect)) this.jumped.add(`server:${car.id}`);
         for (const car of this.cars) if (hit(car.rect, bus.rect)) this.jumped.add(car);
         if (bus.air === 1) {                   // приземление
             this.burst(bus.x, bus.y + bus.h, [190, 180, 160], 30, 4, 6, 35);
@@ -621,6 +628,7 @@ class GameUpdate extends GameCore {
     }
 
     updateMotorcade() {
+        if (this.serverTrafficActive) return;
         const bus = this.bus, mins = Math.floor(this.clock / FRAMES_PER_MIN);
         // за час до кортежа — объявление
         if (this.motorcadeAt && !this.motorcadeAnnounced && mins >= this.motorcadeAt - 60) {
@@ -678,6 +686,13 @@ class GameUpdate extends GameCore {
         const bus = this.bus;
         if (bus.air || bus.invuln || bus.landing) return;
         const hb = inflate(bus.rect, -8, -8);
+        for (const car of this.serverCars || []) {
+            const body = rect(car.x - car.w / 2 + 3, car.y - car.h / 2 + 3, car.w - 6, car.h - 6);
+            if (car.collidable && car.alpha > 0.25 && hit(hb, car.rect) && rotatedHit(hb, this.bendAngle(), body, car.angle)) {
+                this.crash(car.rect);
+                return;
+            }
+        }
         for (const v of this.motorcade ? this.motorcade.convoy : []) {   // влез на встречку перед кортежем
             const r = rect(v.x - 27, v.y, 54, v.len);
             if (hit(hb, inflate(r, -6, -6))) {
@@ -685,7 +700,7 @@ class GameUpdate extends GameCore {
                 return;
             }
         }
-        for (const car of this.cars) {
+        for (const car of this.serverTrafficActive ? [] : this.cars) {
             if (!car.wreck && hit(hb, inflate(car.rect, -6, -6))) {     // по обломкам проезжаем
                 this.crash(car.rect, car);
                 return;
@@ -769,7 +784,7 @@ class GameUpdate extends GameCore {
 
         const bus = this.bus;
         bus.bay = this.bayExtra();
-        bus.closed = this.busClosed();
+        bus.closed = approach(bus.closed, this.busClosed(), 0.75);
         bus.update(this.keys);
         // тупик: дальше не проехать, только повернуть
         for (const inter of this.inters) {
@@ -806,7 +821,7 @@ class GameUpdate extends GameCore {
         }
         this.spawnObjects();
 
-        if (--this.spawnTimer <= 0 && !this.motorcade) {      // при перекрытии новых машин нет
+        if (!this.serverTrafficActive && --this.spawnTimer <= 0 && !this.motorcade) {      // при перекрытии новых машин нет
             this.spawnCar();
             // больше полос — больше машин
             const hard = Math.min(1, this.distance / 60000), k = (4 / LANES) / this.route.traffic;

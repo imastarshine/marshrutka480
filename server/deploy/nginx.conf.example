@@ -20,6 +20,11 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/game.example.com/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     server_tokens off;
+    gzip on;
+    gzip_vary on;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_types text/javascript application/javascript text/css application/json image/svg+xml;
     client_max_body_size 16k;
     client_body_timeout 10s;
     client_header_timeout 10s;

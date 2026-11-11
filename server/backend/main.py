@@ -26,6 +26,7 @@ from .database import Database
 from .middleware import SecurityMiddleware
 from .models import ActionMessage, AuthMessage, CityPoseMessage, CreateRoom, Credentials, EmptyBody, InputMessage, PingMessage
 from .city import CityRoom
+from .traffic import load_graph
 from .rooms import Connection, PUBLIC_CITY_CODE, RoomManager
 from .security import RateLimiter, bounded_thread_work, hash_password, token_hash, verify_password
 
@@ -48,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.hash_slots = asyncio.Semaphore(2)
         app.state.hash_tasks = set()
         app.state.dummy_hash = await asyncio.to_thread(hash_password,secrets.token_urlsafe(24))
+        await asyncio.to_thread(load_graph)
         app.state.pending_ws = {}
         app.state.rooms.task = asyncio.create_task(app.state.rooms.run(),name="authoritative-world")
         try:
@@ -108,7 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok":True,"version":"2.2.0-beta.1","protocol":1,"features":["original-city","world-poses","irkutsk-routes","osm-road-geometry","public-city","guest-access"]}
+        return {"ok":True,"version":"2.2.0-beta.2","protocol":1,"features":["original-city","world-poses","irkutsk-routes","osm-road-geometry","public-city","guest-access","shared-traffic"]}
 
     @app.post("/api/auth/guest", status_code=201)
     async def guest(body: EmptyBody, request: Request):
@@ -251,7 +253,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             admitted = True
             await ws.send_json({"type":"welcome","player_id":user["id"],"protocol":1})
             write_task = asyncio.create_task(sender(conn))
-            conn.send(app.state.rooms.rooms[auth.room].snapshot())
+            room = app.state.rooms.rooms[auth.room]
+            conn.send(room.snapshot(user["id"]) if isinstance(room, CityRoom) else room.snapshot())
             invalid = 0
             while True:
                 message = await read_message(ws,35)

@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && mkdir -p /app/server/data \
     && chown game:game /app/server/data
 COPY --chown=game:game server/backend ./backend
+COPY --chown=game:game server/assets ./assets
 COPY --chown=game:game web /app/web
 COPY --chown=game:game server/run.py ./run.py
 USER 10001:10001

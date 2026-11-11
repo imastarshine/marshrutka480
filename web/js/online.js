@@ -17,18 +17,26 @@ class CitySession {
         this.turnFrom = null;
         this.mapMarkersCount = 0;
         this.drawnPlayers = 0;
+        this.authoritativeTrafficEnabled = false;
+        this.trafficSamples = new Map();
+        this.trafficFirstSeen = new Map();
+        this.drawnTraffic = 0;
     }
     get active() { return Boolean(this.state?.room?.mode === "city"); }
+    get authoritativeTraffic() { return this.active && this.authoritativeTrafficEnabled; }
     clear() {
+        if (this.boundGame) { this.boundGame.serverWorldEnabled = false; this.boundGame.serverCars = []; }
         this.state = null; this.previous.clear(); this.samples.clear(); this.buses.clear(); this.horns.clear();
         this.serverPerfOffset = null; this.lastRenderTime = -Infinity;
         this.turnFrom = null; this.mapMarkersCount = 0; this.drawnPlayers = 0;
+        this.authoritativeTrafficEnabled = false; this.trafficSamples.clear(); this.trafficFirstSeen.clear(); this.drawnTraffic = 0;
     }
     receive(state) {
         if (state.room?.mode !== "city") return;
         const now = performance.now();
         if (this.state && (this.state.room.code !== state.room.code || this.state.seed !== state.seed)) {
             this.samples.clear(); this.serverPerfOffset = null; this.lastRenderTime = -Infinity;
+            this.trafficSamples.clear(); this.trafficFirstSeen.clear(); this.authoritativeTrafficEnabled = false;
         }
         const packetTime = Number.isFinite(state.server_time) ? state.server_time * 1000 : Date.now();
         const observedOffset = packetTime - now;
@@ -44,6 +52,24 @@ class CitySession {
             else if (time === samples.at(-1).time) samples[samples.length - 1] = { time, pose: player };
             this.samples.set(player.id, samples.slice(-20));
             if (before) this.previous.set(player.id, before.pose);
+        }
+        if (state.world?.authoritative_traffic === true) this.authoritativeTrafficEnabled = true;
+        if (this.authoritativeTrafficEnabled && Array.isArray(state.traffic)) {
+            const time = Number.isFinite(state.traffic_server_time) ? state.traffic_server_time * 1000 : packetTime;
+            const trafficIds = new Set();
+            for (const actor of state.traffic) {
+                if (!Number.isFinite(actor.wx) || !Number.isFinite(actor.wy) || !Number.isFinite(actor.angle)) continue;
+                trafficIds.add(actor.id);
+                let samples = this.trafficSamples.get(actor.id) || [];
+                const before = samples.at(-1);
+                if (before && Math.hypot(actor.wx-before.pose.wx, actor.wy-before.pose.wy) > Math.max(900, (time-before.time)*1.4+300)) samples = [];
+                if (!samples.length || time > samples.at(-1).time) samples.push({ time, pose: actor });
+                this.trafficSamples.set(actor.id, samples.slice(-16));
+                if (!this.trafficFirstSeen.has(actor.id)) this.trafficFirstSeen.set(actor.id, now);
+            }
+            for (const id of this.trafficSamples.keys()) if (!trafficIds.has(id)) {
+                this.trafficSamples.delete(id); this.trafficFirstSeen.delete(id);
+            }
         }
         this.state = state;
         this.received = now;
@@ -86,22 +112,75 @@ class CitySession {
         });
     }
     onReset() { this.pendingSpawn = true; this.turnFrom = null; }
-    captureTurn(g) { this.turnFrom = {wx:g.wx, wy:g.wy, angle:Math.atan2(g.dir[0], -g.dir[1])}; }
+    traffic(now = performance.now()) {
+        if (!this.authoritativeTraffic) return [];
+        const target = Math.max(this.lastRenderTime, now + (this.serverPerfOffset ?? 0) - this.renderDelay);
+        const faded = clamp(1 - Math.max(0, now - this.received - 1500) / 4000, 0.3, 1);
+        const result = [];
+        for (const [id, samples] of this.trafficSamples) {
+            let before = samples[0], after = null;
+            for (const sample of samples) {
+                if (sample.time <= target) before = sample;
+                else { after = sample; break; }
+            }
+            let pose = before.pose;
+            if (after && after !== before) {
+                const a=before.pose, b=after.pose, t=clamp((target-before.time)/Math.max(1,after.time-before.time),0,1);
+                const angle=Math.atan2(Math.sin(b.angle-a.angle),Math.cos(b.angle-a.angle));
+                pose={...a,wx:a.wx+(b.wx-a.wx)*t,wy:a.wy+(b.wy-a.wy)*t,
+                    lateral:(a.lateral||0)+((b.lateral||0)-(a.lateral||0))*t,angle:a.angle+angle*t};
+            } else if (!after && samples.length > 1) {
+                const latest=samples.at(-1), old=samples.at(-2), ahead=clamp(target-latest.time,0,100)/1000;
+                pose=latest.pose;
+                if (ahead && Math.abs(pose.speed||0)>0.1) {
+                    const seconds=Math.max(.02,(latest.time-old.time)/1000);
+                    let vx=(pose.wx-old.pose.wx)/seconds,vy=(pose.wy-old.pose.wy)/seconds;
+                    const ratio=Math.min(1,1250/Math.max(1,Math.hypot(vx,vy)));
+                    pose={...pose,wx:pose.wx+vx*ratio*ahead,wy:pose.wy+vy*ratio*ahead};
+                }
+            }
+            result.push({...pose,alpha:faded*clamp((now-(this.trafficFirstSeen.get(id)??now))/180,0,1),
+                collidable:now-this.received<1000});
+        }
+        return result;
+    }
+    trafficProxies(g, now = performance.now()) {
+        return this.traffic(now).map((actor) => {
+            const view=this.project(g,{...actor,lateral:actor.lateral||0}),w=actor.w||CAR_W,h=actor.h||CAR_H;
+            const width=Math.abs(Math.cos(view.angle))*w+Math.abs(Math.sin(view.angle))*h;
+            const height=Math.abs(Math.cos(view.angle))*h+Math.abs(Math.sin(view.angle))*w;
+            return {...view,id:actor.id,w,h,color:actor.color,braking:actor.braking,speed:actor.speed,
+                alpha:actor.alpha,collidable:actor.collidable,rect:rect(view.x-width/2,view.y-height/2,width,height)};
+        }).filter((car) => car.x>-MARGIN-200&&car.x<WIDTH+MARGIN+200&&car.y>-300&&car.y<HEIGHT+300);
+    }
+    drawTraffic(g) {
+        this.drawnTraffic=0;
+        for(const car of this.trafficProxies(g)) {
+            const color=Array.isArray(car.color)&&car.color.length===3?car.color:[145,155,165];
+            ctx.save();ctx.globalAlpha=car.alpha;ctx.translate(car.x,car.y);ctx.rotate(car.angle);
+            drawCarBody(rect(-car.w/2,-car.h/2,car.w,car.h),color,car.braking);
+            ctx.restore();this.drawnTraffic++;
+        }
+    }
+    captureTurn(g) { this.turnFrom = {wx:g.wx, wy:g.wy, lateral:g.bus.x-roadMiddle(), angle:Math.atan2(g.dir[0], -g.dir[1])}; }
     pose(g) {
-        let wx = g.wx, wy = g.wy, angle = Math.atan2(g.dir[0], -g.dir[1]);
+        let wx = g.wx, wy = g.wy, lateral=g.bus.x-roadMiddle(), angle = Math.atan2(g.dir[0], -g.dir[1]);
         if (g.state === "turning" && this.turnFrom) {
             const t = smooth(1-g.turnT/g.turnTotal);
             wx = this.turnFrom.wx+(wx-this.turnFrom.wx)*t;
             wy = this.turnFrom.wy+(wy-this.turnFrom.wy)*t;
             const delta = Math.atan2(Math.sin(angle-this.turnFrom.angle), Math.cos(angle-this.turnFrom.angle));
             angle = this.turnFrom.angle+delta*t;
+            lateral = this.turnFrom.lateral+(lateral-this.turnFrom.lateral)*t;
         }
-        return {wx,wy,lateral:g.bus.x-roadMiddle(),angle:Math.atan2(Math.sin(angle),Math.cos(angle)),
+        return {wx,wy,lateral,angle:Math.atan2(Math.sin(angle),Math.cos(angle)),
             speed:g.state==="play"?g.bus.speed:0,jump:g.bus.z,door:g.bus.doorOpen,braking:g.bus.braking,
             bus:g.model.key,route:g.route.num,state:g.state,street:g.currentStreet().slice(0,60)};
     }
     beforeTick(g) {
+        this.boundGame = g;
         if (!this.active) return;
+        if (this.authoritativeTraffic) g.prepareSharedWorld();
         // The same intersection uses the same light phase for everyone on this street.
         const worldFrame = Math.floor((Date.now()+this.clockOffset)/1000*60);
         for (const inter of g.inters) {

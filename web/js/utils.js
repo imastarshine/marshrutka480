@@ -290,6 +290,18 @@ function hit(a, b) {
     return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
+function rotatedHit(first, firstAngle, second, secondAngle) {
+    const a = [Math.cos(firstAngle), Math.sin(firstAngle)], b = [Math.cos(secondAngle), Math.sin(secondAngle)];
+    const dx = second.x + second.w / 2 - first.x - first.w / 2;
+    const dy = second.y + second.h / 2 - first.y - first.h / 2;
+    for (const axis of [a, [-a[1], a[0]], b, [-b[1], b[0]]]) {
+        const ar = first.w / 2 * Math.abs(axis[0] * a[0] + axis[1] * a[1]) + first.h / 2 * Math.abs(-axis[0] * a[1] + axis[1] * a[0]);
+        const br = second.w / 2 * Math.abs(axis[0] * b[0] + axis[1] * b[1]) + second.h / 2 * Math.abs(-axis[0] * b[1] + axis[1] * b[0]);
+        if (Math.abs(dx * axis[0] + dy * axis[1]) >= ar + br) return false;
+    }
+    return true;
+}
+
 function fillRect(x, y, w, h, c, a = 1, radius = 0) {
     ctx.fillStyle = col(c, a);
     if (radius) {

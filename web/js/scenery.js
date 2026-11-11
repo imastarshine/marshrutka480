@@ -1,26 +1,140 @@
 // Маршрутка — город: деревья, фонари и застройка по районам
 "use strict";
 
-// ---------- деревья и фонари вдоль тротуаров (зациклены — работают и при заднем ходе) ----------
+// Застройка пока аркадная, но её адрес постоянен: исходная OSM way,
+// расстояние вдоль её связанных рёбер и физическая сторона. Время въезда, scroll,
+// направление движения и количество поворотов не участвуют в генерации.
+function sceneryHash(...parts) {
+    let value = 2166136261;
+    for (const character of parts.join("|")) {
+        value = Math.imul(value ^ character.charCodeAt(0), 16777619);
+    }
+    return value >>> 0;
+}
+
+function sceneryLocation(owner) {
+    const edge = owner?.cityEdge;
+    const session = typeof window === "undefined" ? null : window.citySession;
+    const shared = session?.active && session.state?.world?.authoritative_traffic === true;
+    const seed = shared && Number.isFinite(session.state.seed) ? session.state.seed : 0;
+    return {
+        edgeId: String(edge?.id ?? edge?.index ?? "offline-city"),
+        length: Number.isFinite(edge?.length) ? edge.length : Infinity,
+        offset: Number.isFinite(owner?.cityOffset) ? owner.cityOffset : 0,
+        reverse: Boolean(owner?.cityReverse),
+        district: DISTRICTS[edge?.district] ? edge.district : "center",
+        centerY: owner?.bus?.centerY ?? BUS_BOTTOM,
+        seed,
+    };
+}
+
+function sceneryFrame(frame) {
+    const session = typeof window === "undefined" ? null : window.citySession;
+    if (!session?.active || !Number.isFinite(session.clockOffset)) return frame;
+    return Math.floor((Date.now() + session.clockOffset) * 60 / 1000);
+}
+
+const sceneryRoadAtlases = new WeakMap();
+function sceneryRoadAddress(owner, edge) {
+    const graph = owner?.cityGraph;
+    if (!graph || !edge?.osmWayIds?.length || edge.osmWayIds.length !== 1) {
+        return { key: String(edge?.id ?? "offline-city"), prefix: 0 };
+    }
+    let atlas = sceneryRoadAtlases.get(graph);
+    if (!atlas) {
+        atlas = { groups: new Map(), addresses: new Map() };
+        for (const candidate of graph.edges.values()) {
+            if (candidate.osmWayIds?.length !== 1) continue;
+            const way = String(candidate.osmWayIds[0]);
+            if (!atlas.groups.has(way)) atlas.groups.set(way, []);
+            atlas.groups.get(way).push(candidate);
+        }
+        sceneryRoadAtlases.set(graph, atlas);
+    }
+    if (!atlas.addresses.has(edge.id)) {
+        const group = atlas.groups.get(String(edge.osmWayIds[0])) || [edge];
+        const remaining = new Set(group), ends = new Set(group.map(part => part.to));
+        const ordered = [...group].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+        while (remaining.size) {
+            const first = ordered.find(part => remaining.has(part) && !ends.has(part.from)) ||
+                ordered.find(part => remaining.has(part));
+            const key = `osm-way-${edge.osmWayIds[0]}:${first.from}`;
+            let part = first, prefix = 0;
+            while (part && remaining.has(part)) {
+                remaining.delete(part);
+                atlas.addresses.set(part.id, { key, prefix });
+                prefix += part.length;
+                part = ordered.find(next => remaining.has(next) && next.from === part.to);
+            }
+        }
+    }
+    return atlas.addresses.get(edge.id);
+}
+
+function scenerySections(owner, fallbackOffset = 0) {
+    const base = sceneryLocation(owner), result = [];
+    if (typeof owner?.cityGeometryAt === "function") {
+        let ahead = -HEIGHT - 500;
+        for (let count = 0; count < 256 && ahead < HEIGHT + 500; count++) {
+            const geo = owner.cityGeometryAt(ahead);
+            if (!geo?.edge || !Number.isFinite(geo.start) || !Number.isFinite(geo.end) || geo.end <= ahead + 0.0001) break;
+            result.push({ ...base, ...geo, edgeId: String(geo.edge.id), length: geo.edge.length,
+                district: DISTRICTS[geo.edge.district] ? geo.edge.district : "center",
+                ...sceneryRoadAddress(owner, geo.edge) });
+            ahead = geo.end + 0.001;
+        }
+        if (result.length) return result;
+    }
+    const offset = owner ? base.offset : fallbackOffset;
+    const progress = base.reverse ? base.length - offset : offset;
+    return [{ ...base, edge: owner?.cityEdge || { id: base.edgeId, length: base.length },
+        start: -progress, end: base.length - progress, ...sceneryRoadAddress(owner, owner?.cityEdge) }];
+}
+
+function sceneryCellRange(section, cellSize) {
+    const visibleStart = Math.max(section.start, -HEIGHT - 500);
+    const visibleEnd = Math.min(section.end, HEIGHT + 500);
+    const a = section.prefix + (section.reverse ? section.edge.length - (visibleEnd - section.start) : visibleStart - section.start);
+    const b = section.prefix + (section.reverse ? section.edge.length - (visibleStart - section.start) : visibleEnd - section.start);
+    return [Math.max(0, Math.floor(a / cellSize)), Math.max(0, Math.floor(b / cellSize))];
+}
+
+// ---------- деревья и фонари на постоянных физических местах ----------
 class Strip {
     static LENGTH = 1600;
+    static CELL = 128;
 
-    constructor(x, kind) {
-        Object.assign(this, { x, kind });
+    constructor(x, kind, game = null) {
+        Object.assign(this, { x, kind, game });
+        this.canonicalSide = kind === "trees" ? "L" : "R";
         this.items = [];
-        for (let y = 0; y < Strip.LENGTH; y += randint(70, 140)) this.items.push(y);
     }
 
     draw(offset) {
-        for (const start of this.items) {
-            const y = Math.floor(mod(start + offset, Strip.LENGTH)) - 300;
-            if (y > HEIGHT + 20 || y < -40) continue;
-            if (this.kind === "trees") tree(this.x, y, 15);
-            else {   // фонари
+        this.items = [];
+        for (const section of scenerySections(this.game, Number.isFinite(offset) ? offset : 0)) {
+          const [first, last] = sceneryCellRange(section, Strip.CELL);
+          for (let index = first; index <= last; index++) {
+            const seed = sceneryHash(section.seed, section.key, this.canonicalSide, "strip", index);
+            const canonicalOffset = index * Strip.CELL + 28 + (seed % 73), localOffset = canonicalOffset - section.prefix;
+            if (localOffset < 0 || localOffset >= section.edge.length) continue;
+            const ahead = section.start + (section.reverse ? section.edge.length - localOffset : localOffset);
+            const y = section.centerY - ahead;
+            if (y > HEIGHT + 30 || y < -40) continue;
+            this.items.push({ edge: section.edge.id, offset: localOffset, roadOffset: canonicalOffset, seed });
+            ctx.save();
+            if (section.reverse) {
+                ctx.translate(2 * roadMiddle(), 2 * y);
+                ctx.scale(-1, -1);
+            }
+            if (this.kind === "trees") tree(this.x, y, 13 + seed % 5);
+            else {
                 circle(this.x, y, 5, [80, 80, 85]);
                 line(this.x, y, this.x - 24, y, [80, 80, 85], 3);
                 circle(this.x - 24, y, 4, [255, 240, 180]);
             }
+            ctx.restore();
+          }
         }
     }
 }
@@ -62,49 +176,98 @@ function miniCar(x, y, c, horizontal = false) {
 }
 
 class Scenery {
+    static CELL = 360;
+
     constructor(game) {
         this.game = game;
         this.segs = [];
+        this.cells = new Map();
+        this.signature = null;
         this.fill();
     }
 
-    make(side, edge, above) {
-        const kinds = DISTRICTS[this.game.district].kinds;
-        const kind = choice(kinds);
+    make(side, index, location = sceneryLocation(this.game)) {
+        const seed = sceneryHash(location.seed, location.key || location.edgeId, side, "building", index);
+        const random = seeded(seed);
+        const kinds = DISTRICTS[location.district].kinds;
+        const kind = kinds[Math.floor(random() * kinds.length)];
         const [a, b] = SEG_H[kind];
-        const h = randint(a, b);
-        return { side, kind, h, y: above ? edge - h : edge, seed: randint(1, 1e9), district: this.game.district };
+        const h = a + Math.floor(random() * (b - a + 1));
+        const start = index * Scenery.CELL + Math.floor(random() * (Scenery.CELL - h));
+        return { side, kind, h, start, end: start + h, seed, district: location.district,
+            edgeId: location.edgeId, cell: index };
     }
 
     fill() {
-        for (const side of ["L", "R"]) {
-            const mine = this.segs.filter((s) => s.side === side);
-            let top = mine.length ? Math.min(...mine.map((s) => s.y)) : HEIGHT + 400;
-            let bottom = mine.length ? Math.max(...mine.map((s) => s.y + s.h)) : HEIGHT + 400;
-            while (top > -500) {
-                const s = this.make(side, top, true);
-                this.segs.push(s);
-                top = s.y;
+        const location = sceneryLocation(this.game);
+        const signature = `${location.seed}`;
+        if (signature !== this.signature || this.graph !== this.game.cityGraph) {
+            this.cells.clear();
+            this.signature = signature;
+            this.graph = this.game.cityGraph;
+        }
+        this.location = location;
+        const visible = [];
+        this.sections = scenerySections(this.game);
+        for (const section of this.sections) {
+          const [first, last] = sceneryCellRange(section, Scenery.CELL);
+          for (const side of ["L", "R"]) {
+            for (let index = first; index <= last; index++) {
+                const key = `${section.key}:${section.district}:${side}:${index}`;
+                let cell = this.cells.get(key);
+                if (!cell) { cell = this.make(side, index, section); this.cells.set(key, cell); }
+                const localStart = cell.start - section.prefix, localEnd = cell.end - section.prefix;
+                if (localEnd < 0 || localStart > section.edge.length) continue;
+                const ahead = section.start + (section.reverse ? section.edge.length - localStart : localEnd);
+                const y = section.centerY - ahead;
+                visible.push({ ...cell, y, reverse: section.reverse, cacheKey: key,
+                    clipTop: section.centerY - section.end, clipBottom: section.centerY - section.start });
             }
-            while (bottom < HEIGHT + 400) {
-                const s = this.make(side, bottom, false);
-                this.segs.push(s);
-                bottom = s.y + s.h;
-            }
+          }
+        }
+        this.segs = visible;
+        // Долгая смена не накапливает весь город в памяти; удалённая секция
+        // при возвращении воссоздаётся по тому же адресу и seed.
+        if (this.cells.size > 128) {
+            const retained = new Set(visible.map(segment => segment.cacheKey));
+            for (const key of this.cells.keys()) if (!retained.has(key)) this.cells.delete(key);
         }
     }
 
-    update(scroll) {
-        for (const s of this.segs) s.y += scroll;
-        this.segs = this.segs.filter((s) => s.y < HEIGHT + 700 && s.y + s.h > -900);
+    update(_scroll) {
         this.fill();
     }
 
     draw(frame) {
-        for (const s of this.segs) if (s.y < HEIGHT && s.y + s.h > 0) this.drawSeg(s, frame);
+        this.fill();
+        for (const side of ["L", "R"]) {
+            const [left, right] = sideX(side);
+            fillRect(left, 0, right - left, HEIGHT, DISTRICTS.center.ground);
+            for (const section of this.sections) {
+                const top = Math.max(0, section.centerY - section.end);
+                const bottom = Math.min(HEIGHT, section.centerY - section.start);
+                if (bottom > top) fillRect(left, top, right - left, bottom - top, DISTRICTS[section.district].ground);
+            }
+        }
+        const sharedFrame = sceneryFrame(frame);
+        for (const s of this.segs) if (s.y < HEIGHT && s.y + s.h > 0) this.drawSeg(s, sharedFrame);
     }
 
     drawSeg(s, frame) {
+        const top = s.clipTop, bottom = s.clipBottom;
+        ctx.save();
+        if (Number.isFinite(top) && Number.isFinite(bottom)) {
+            ctx.beginPath();ctx.rect(-MARGIN, top, WIDTH + MARGIN * 2, Math.max(0, bottom - top));ctx.clip();
+        }
+        if (s.reverse) {
+            ctx.translate(2 * roadMiddle(), 2 * s.y + s.h);
+            ctx.scale(-1, -1);
+        }
+        this.drawCanonicalSeg(s, frame);
+        ctx.restore();
+    }
+
+    drawCanonicalSeg(s, frame) {
         const [x0, x1] = sideX(s.side), w = x1 - x0, y = s.y, h = s.h;
         const L = s.side === "L";
         const r = seeded(s.seed);

@@ -145,6 +145,10 @@ class Intersection {
     update(scroll, busClose, bus) {
         this.y += scroll;
         this.t += 1;
+        if (window.citySession?.authoritativeTraffic) {
+            this.crossCars = []; this.peds.peds = [];
+            return;
+        }
         const redLeft = CYCLE - this.phase;
         this.peds.update(this.state === "red" && redLeft > 160, 1.6, busClose || this.state === "green", bus, this.zebraTop);
         // поперечные машины едут, пока у нас красный (и не в самом его конце)
@@ -267,6 +271,7 @@ class PedLane {
     }
 
     update(canSpawn, rate, busClose, bus = null, top = 0) {
+        if (window.citySession?.authoritativeTraffic) { this.peds = []; return; }
         // пешеход сам в маршрутку не лезет: если она стоит на зебре — ждёт или обходит позже
         const busRect = bus && !bus.air ? inflate(bus.rect, 14, 14) : null;
         if (canSpawn && --this.cool <= 0) {

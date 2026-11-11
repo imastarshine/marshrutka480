@@ -43,6 +43,8 @@ class GameCore {
         this.cityPendingTurn = null;
         this.cityExitSelection = null;
         this.cityRejoinGuide = null;
+        this.cityGeometryHistory = [];
+        this.cityGeometryCache = null;
         this.cityRouteDirections = new Set(this.cityItinerary.legs.map((leg) => `${leg.edge.id}:${leg.reverse}`));
         this.cityRouteEdges = new Set(this.cityItinerary.legs.map((leg) => leg.edge.id));
         this.mapOverview = false;
@@ -72,6 +74,8 @@ class GameCore {
         this.chaseTime = 1500 - 300 * (up.blat || 0);
 
         this.cars = [];
+        this.serverCars = [];
+        this.serverWorldEnabled = false;
         this.stops = [];
         this.inters = [];
         this.ramps = [];
@@ -135,13 +139,25 @@ class GameCore {
     }
 
     newStrips() {
-        this.strips = [new Strip(ROAD_LEFT - 20, "trees"), new Strip(ROAD_RIGHT + 30, "lamps")];
+        this.strips = [new Strip(ROAD_LEFT - 20, "trees", this), new Strip(ROAD_RIGHT + 30, "lamps", this)];
+    }
+
+    get serverTrafficActive() { return Boolean(window.citySession?.authoritativeTraffic); }
+
+    prepareSharedWorld() {
+        if (this.serverWorldEnabled) return;
+        this.serverWorldEnabled = true;
+        this.cars = []; this.serverCars = []; this.ramps = []; this.posts = []; this.stations = [];
+        this.crosswalks = []; this.shifts = []; this.police = null; this.heli = null;
+        this.motorcade = null; this.motorcadeAt = null; this.wanted = 0;
+        this.openBelow = LANES / 2 - CLOSED; this.styleBelow = "tiles";
+        for (const inter of this.inters) { inter.crossCars = []; inter.peds.peds = []; }
+        if (this.state === "station" || this.state === "caught") { this.state = "play"; this.station = null; this.caught = null; }
     }
 
     // Изгиб дороги следует импортированной геометрии. Случайного виляния нет.
     bendAt(along) {
-        const offset = this.cityOffset + (along - this.along) * (this.cityReverse ? -1 : 1);
-        const [x, y] = this.cityGraph.position(this.cityEdge, offset);
+        const [x, y] = this.cityGeometryAt(along - this.along).position;
         const camera = this.cameraDir || this.dir;
         return (x - this.wx) * -camera[1] + (y - this.wy) * camera[0];
     }
@@ -158,8 +174,12 @@ class GameCore {
     }
 
     updateCameraDirection() {
+        if (this.state === "turning") return;
         const camera = this.cameraDir || this.dir;
-        const current = Math.atan2(camera[1], camera[0]), desired = Math.atan2(this.dir[1], this.dir[0]);
+        const before = this.cityGeometryAt(-100).position, ahead = this.cityGeometryAt(100).position;
+        const dx = ahead[0] - before[0], dy = ahead[1] - before[1];
+        const current = Math.atan2(camera[1], camera[0]);
+        const desired = Math.hypot(dx, dy) > 0.01 ? Math.atan2(dy, dx) : Math.atan2(this.dir[1], this.dir[0]);
         const difference = Math.atan2(Math.sin(desired - current), Math.cos(desired - current));
         const angle = current + difference * 0.22;
         this.cameraDir = [Math.cos(angle), Math.sin(angle)];
@@ -220,7 +240,7 @@ class GameCore {
 
     screenToWorld(screenY) {
         const ahead = this.bus.centerY - screenY;
-        return this.cityGraph.position(this.cityEdge, this.cityOffset + ahead * (this.cityReverse ? -1 : 1));
+        return this.cityGeometryAt(ahead).position;
     }
 
     // Только исходящие рёбра настоящего узла; ожидаемая улица маршрута имеет
@@ -316,7 +336,67 @@ class GameCore {
         return this.cityRejoinGuide = { key, edge: null };
     }
 
+    // A visible road can cross many short source edges. Sample the same
+    // connected ribbon on either side of a junction instead of clamping the
+    // horizon to the current edge and redrawing it on the next frame.
+    cityGeometryAt(distanceAhead = 0) {
+        const graph = this.cityGraph, current = this.cityEdge;
+        let cache = this.cityGeometryCache;
+        if (!cache || cache.edge !== current || cache.reverse !== this.cityReverse ||
+            cache.offset !== this.cityOffset || cache.selection !== this.cityExitSelection ||
+            cache.pending !== this.cityPendingTurn) {
+            const progress = this.cityReverse ? current.length - this.cityOffset : this.cityOffset;
+            const segments = [{ edge: current, reverse: this.cityReverse, start: -progress, end: current.length - progress }];
+            const history = this.cityGeometryHistory || [];
+            for (let index = history.length - 1; index >= 0 && segments[0].start > -3000; index--) {
+                const leg = history[index], next = segments[0];
+                if (graph.endpoint(leg.edge, leg.reverse) !== graph.origin(next.edge, next.reverse)) break;
+                segments.unshift({ ...leg, start: next.start - leg.edge.length, end: next.start });
+            }
+            let legIndex = this.cityOffRoute ? -1 : this.cityLegIndex;
+            for (let step = 0; step < 256 && segments.at(-1).end < 3000; step++) {
+                const leg = segments.at(-1), node = graph.endpoint(leg.edge, leg.reverse);
+                const expectedIndex = legIndex < 0 ? -1 : (legIndex + 1) % this.cityItinerary.legs.length;
+                const expected = expectedIndex < 0 ? null : this.cityItinerary.legs[expectedIndex];
+                let option;
+                if (step === 0) {
+                    const options = this.cityOptions(node), selected = this.selectedCityExit(options);
+                    const pending = this.cityPendingTurn?.node === node
+                        ? options.choices.find((candidate) => candidate.edge.id === this.cityPendingTurn.edge && candidate.reverse === this.cityPendingTurn.reverse)
+                        : null;
+                    option = pending || selected || (!this.cityTurnaround() ? options.straight : null);
+                } else {
+                    const choices = graph.outgoingFrom(node).filter((candidate) =>
+                        this.cityCanContinue(leg.edge, leg.reverse, candidate));
+                    option = choices.find((candidate) => expected && candidate.edge.id === expected.edge.id && candidate.reverse === expected.reverse) || choices[0];
+                }
+                if (!option || !this.cityCanContinue(leg.edge, leg.reverse, option)) break;
+                segments.push({ edge: option.edge, reverse: option.reverse, start: leg.end, end: leg.end + option.edge.length });
+                legIndex = expected && option.edge.id === expected.edge.id && option.reverse === expected.reverse ? expectedIndex : -1;
+            }
+            cache = this.cityGeometryCache = { edge: current, reverse: this.cityReverse, offset: this.cityOffset,
+                selection: this.cityExitSelection, pending: this.cityPendingTurn, segments };
+        }
+        const segments = cache.segments;
+        let lo = 0, hi = segments.length - 1;
+        while (lo < hi) {
+            const middle = (lo + hi) >> 1;
+            if (segments[middle].end < distanceAhead) lo = middle + 1;
+            else hi = middle;
+        }
+        const leg = segments[lo], travelled = clamp(distanceAhead - leg.start, 0, leg.edge.length);
+        const offset = leg.reverse ? leg.edge.length - travelled : travelled;
+        return { edge: leg.edge, reverse: leg.reverse, offset, start: leg.start, end: leg.end,
+            position: graph.position(leg.edge, offset), dir: graph.direction(leg.edge, leg.reverse, offset) };
+    }
+
     cityEnter(option, nodeId) {
+        const history = this.cityGeometryHistory || (this.cityGeometryHistory = []);
+        history.push({ edge: this.cityEdge, reverse: this.cityReverse });
+        let retained = 0, first = history.length - 1;
+        while (first >= 0 && retained < 8000) retained += history[first--].edge.length;
+        if (first >= 0) history.splice(0, first + 1);
+        this.cityGeometryCache = null;
         const legs = this.cityItinerary.legs;
         const nextIndex = (this.cityLegIndex + 1) % legs.length;
         const matches = (leg) => leg.edge.id === option.edge.id && leg.reverse === option.reverse;
@@ -378,9 +458,6 @@ class GameCore {
             this[key] = this[key].filter((object) => object.y >= this.bus.centerY);
         }
         setRoad(this.cityEdge.lanes);
-        this.shifts = [];
-        this.openBelow = LANES / 2 - CLOSED;
-        this.newStrips();
         for (const stop of this.stops) stop.edge = ROAD_RIGHT - this.closedW(stop.centerY);
     }
 
@@ -507,7 +584,6 @@ class GameCore {
             this.ramps = this.ramps.filter((ramp) => Math.abs(ramp.y - y) > 500);
             this.posts = this.posts.filter((post) => Math.abs(post.y - y) > 600);
             this.crosswalks = this.crosswalks.filter((crosswalk) => Math.abs(crosswalk.y - y) > 400);
-            this.shifts = this.shifts.filter((shift) => Math.abs(shift.y - y) > 600);
             const stop = new BusStop(definition.id, y, this.route, this.rep, definition);
             stop.edge = ROAD_RIGHT - this.closedW(stop.centerY);
             stop.cityEdge = segment.edge.id;
@@ -596,14 +672,22 @@ class GameCore {
 
     // сколько полос на сторону открыто на высоте y (дробно — на скосе)
     openAt(y) {
-        const T = LaneShift.TAPER;
-        let val = this.openBelow;
-        for (const t of [...this.shifts].sort((a, b) => b.y - a.y)) {
-            if (y > t.y + T / 2) return val;
-            if (y > t.y - T / 2) return t.from + (t.to - t.from) * smooth((t.y + T / 2 - y) / T);
-            val = t.to;
+        const distance = this.bus.centerY - y, radius = 900;
+        this.cityGeometryAt(distance);
+        const legs = this.cityGeometryCache.segments;
+        // Convolve source lane counts over a 58m ribbon. Even very short OSM
+        // fragments blend continuously rather than replacing the road width.
+        const cumulative = (value) => value <= -radius ? 0 : value >= radius ? 1
+            : value < 0 ? (value + radius) ** 2 / (2 * radius ** 2)
+                : 1 - (radius - value) ** 2 / (2 * radius ** 2);
+        let result = 0;
+        for (const leg of legs) {
+            if (leg.end < distance - radius || leg.start > distance + radius) continue;
+            result += leg.edge.lanes / 2 * (cumulative(leg.end - distance) - cumulative(leg.start - distance));
         }
-        return val;
+        result += legs[0].edge.lanes / 2 * cumulative(legs[0].start - distance);
+        result += legs.at(-1).edge.lanes / 2 * (1 - cumulative(legs.at(-1).end - distance));
+        return clamp(result, 1, LANES / 2);
     }
 
     closedLanesAt(y) {
@@ -705,6 +789,7 @@ class GameCore {
 
     // нарушение: ДПС замечает его с шансом chance (блат снижает шанс) и добавляет звёзды розыска
     startChase(reason, chance = 1, stars = 1) {
+        if (this.serverTrafficActive) return;
         if (Math.random() > chance * (1 - 0.12 * this.level("blat")) * (1.15 - 0.3 * this.rep / 100)) {
             this.floatText("ДПС не заметили...", this.bus.x, this.bus.y + this.bus.h + 10, BLUE);
             return;
@@ -759,6 +844,7 @@ class GameCore {
     }
 
     spawnPolice() {
+        if (this.serverTrafficActive) return;
         this.police = new Police(this.bus.x, Math.max(this.bus.speed, 0) + 2);
         this.floatText("ДПС!", this.bus.x, this.bus.y + this.bus.h + 20, [120, 170, 255], true);
     }
@@ -775,6 +861,7 @@ class GameCore {
 
     // розыск гаснет, пока ДПС не на хвосте и ты не превышаешь; при 2+ звёздах ДПС возвращается
     updateWanted() {
+        if (this.serverTrafficActive) return;
         const bus = this.bus, stars = this.stars;
         // 3★ — вертолёт: за углом не скрыться, розыск не гаснет, пока он висит над тобой
         if (stars >= 3 && !this.heli) {
@@ -799,6 +886,7 @@ class GameCore {
     }
 
     spawnRoadblock() {
+        if (this.serverTrafficActive) return;
         this.roadblockIn = 60 * 9;
         const y = -CAR_H - 60;
         if (!this.areaFree(y, CAR_H) || this.inters.some((i) => i.y < 200)) {
@@ -858,6 +946,7 @@ class GameCore {
         }
         this.spawnCityStops();
         this.spawnCityBridge();
+        if (this.serverTrafficActive) return;
         if (this.inters.some((i) => !i.arms.straight && i.y > -200)) {
             // впереди тупик: за ним ничего не появляется
             for (const k in this.nextIn) this.nextIn[k] = Math.max(this.nextIn[k], 300);
@@ -871,17 +960,6 @@ class GameCore {
                 this.crosswalks.push(new Crosswalk(y, route.traffic));
                 this.nextIn.cross = rand(1800, 3200) / route.traffic;
             } else this.nextIn.cross = 200;
-        }
-        if (this.nextIn.zone <= 0) {
-            // улица меняет ширину надолго: 3 полосы на сторону → 2 → 1 → 3 ...
-            const T = LaneShift.TAPER, y = -T;
-            const at = this.along + this.bus.centerY - y;
-            const nearLine = this.crossNear(at).some((c) => Math.abs(c.a - at) < T + 450);
-            if (this.areaFree(y - T / 2, T) && !nearLine) {
-                const from = Math.round(this.openAt(y - T));
-                this.shifts.push(new LaneShift(y, from, choice([1, 2, 3].filter((n) => n !== from)), choice(["tiles", "parking"])));
-                this.nextIn.zone = rand(2500, 6000);
-            } else this.nextIn.zone = 300;
         }
         if (this.nextIn.station <= 0) {
             const y = -PoliceStation.HEIGHT - 80;
@@ -908,6 +986,7 @@ class GameCore {
     }
 
     spawnCar() {
+        if (this.serverTrafficActive) return;
         const oncoming = this.cityGraph.canTraverse(this.cityEdge, !this.cityReverse) && Math.random() < 0.45;
         const lane = oncoming ? randint(0, ownFirst() - 1) : randint(ownFirst(), LANES - 1);
         const speed = rand(3, 8);
@@ -1012,13 +1091,12 @@ class GameCore {
         this.stations = [];
         this.shifts = [];
         this.openBelow = LANES / 2 - CLOSED;
-        this.styleBelow = choice(["tiles", "parking"]);
+        this.styleBelow = this.serverTrafficActive ? "tiles" : choice(["tiles", "parking"]);
         if (this.motorcade) {              // свернул — перекрытие осталось на старой улице
             this.motorcade = null;
             this.showBanner("Объехал перекрытие!", GREEN);
         }
         ni.closed = CLOSED;
-        bus.x = laneCenter(sign > 0 ? LANES - 1 - CLOSED : ownFirst());
         bus.vx = 0;
         if (this.police) {
             this.police.y = HEIGHT + 120;

@@ -190,7 +190,7 @@ class GameRender extends GameUpdate {
         for (const s of this.stops) s.draw(this.frame, s === here);
         for (const c of this.crosswalks) c.peds.draw(c.y + 2);
         for (const w of this.walkers) w.draw();
-        for (const c of this.cars) c.draw(this.frame);
+        if (!this.serverTrafficActive) for (const c of this.cars) c.draw(this.frame);
         for (const i of this.inters) i.drawCars();
         this.drawMotorcade();
         if (this.police) this.police.draw(this.frame);
@@ -205,6 +205,7 @@ class GameRender extends GameUpdate {
             const dx = this.bendOffset(y + SLICE / 2);
             ctx.drawImage(worldCanvas, 0, y, worldCanvas.width, SLICE, dx - MARGIN, y, worldCanvas.width, SLICE + 0.5);
         }
+        window.citySession?.drawTraffic(this);
         window.citySession?.drawPlayers(this);
         if (this.heli) this.heli.drawLight(this.bus.x, this.bus.centerY);
         if (withBus) this.bus.draw(this.frame, { x: this.bus.x, y: this.bus.centerY, angle: this.bendAngle() });

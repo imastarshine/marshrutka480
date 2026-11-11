@@ -8,9 +8,9 @@ class Bus {
         this.route = route;
         this.w = model.w;
         this.h = model.h;
-        this.x = laneCenter(LANES - 1);
+        this.x = laneCenter(LANES - 1 - CLOSED);
         this.bay = 0;
-        this.closed = 0;         // ширина парковки/сужения с каждого края рядом с маршруткой            // можно заехать в карман остановки на столько пикселей
+        this.closed = CLOSED * LANE_W;
         this.y = BUS_BOTTOM - this.h;
         this.vx = 0;
         this.speed = 0;
