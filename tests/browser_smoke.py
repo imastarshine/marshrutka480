@@ -43,21 +43,38 @@ def attach(page):
 
 def register(page,name):
     page.goto(BASE,wait_until="networkidle")
-    page.locator("#friends-tab").click()
+    page.locator("#online-mode").click()
     page.locator("#show-register").click()
     page.locator("#username").fill(name)
     page.locator("#password").fill("City-Test-Password-480!")
     page.locator("#auth-submit").click()
     wait(page,"app.user !== null")
 
-def drive(page):
-    page.locator("#room-drive").click()
-    page.locator("canvas").focus()
+def canvas_click(page,x,y,touch=False):
+    box=page.locator("canvas").bounding_box()
+    position={"x":x*box["width"]/640,"y":y*box["height"]/760}
+    if touch:page.locator("canvas").tap(position=position)
+    else:page.locator("canvas").click(position=position)
+
+def original_menu(page,touch=False):
+    if page.evaluate("game.state")=="intro":canvas_click(page,320,380,touch)
+    wait(page,"game.state === 'menu'")
+    for tab in (1,2,0):
+        canvas_click(page,95+150*tab,167,touch)
+        assert page.evaluate("game.tab")==tab
+
+def original_start(page,touch=False):
+    canvas_click(page,320,667,touch)
     for _ in range(20):
         if page.evaluate("game.state")!="dialog":break
         page.wait_for_timeout(160)
-        page.keyboard.press("Enter")
+        canvas_click(page,320,600,touch)
     wait(page,"game.state === 'play'")
+
+def drive(page):
+    page.locator("#room-drive").click()
+    original_menu(page)
+    original_start(page)
 
 with tempfile.TemporaryDirectory(prefix="m480-city-browser-") as temp:
     settings=Settings(db_path=str(Path(temp)/"test.sqlite3"),allowed_origins=(BASE,),allowed_hosts=("127.0.0.1",),auth_limit=1000,register_limit=1000,http_limit=10000)
@@ -81,6 +98,8 @@ with tempfile.TemporaryDirectory(prefix="m480-city-browser-") as temp:
             second.locator("#join-room-form button").click()
             wait(second,"app.socketReady && citySession.active")
             wait(first,"app.room.count === 2")
+            assert first.locator(".main-nav button").count()==2
+            assert first.locator("#online-mode").get_attribute("aria-pressed")=="true"
             drive(first);drive(second)
             wait(first,"citySession.mapMarkersCount === 1")
             wait(second,"citySession.mapMarkersCount === 1")
@@ -142,28 +161,42 @@ with tempfile.TemporaryDirectory(prefix="m480-city-browser-") as temp:
             assert first.evaluate("game.state==='play'")
             mark("bounded reconnect keeps the original run and two-player membership")
 
-            first.locator("#friends-tab").click()
+            first.locator("#online-mode").click()
             first.screenshot(path=str(OUT/"city-dispatch.png"))
             before=first.evaluate("({wx:game.wx,wy:game.wy,wallet:game.save.wallet})")
-            first.locator("#room-leave").click()
-            wait(first,"app.room === null")
             first.locator("#close-panel").click()
-            assert first.evaluate("game.state==='play'")
+            first.evaluate("() => { window.runningBus=game.bus; }")
+            first.locator("#solo-mode").click()
+            wait(first,"app.room === null && !citySession.active")
+            wait(second,"app.room.count===1")
+            assert first.evaluate("game.state==='play' && game.bus===window.runningBus")
             assert first.evaluate("game.save.wallet")==before["wallet"]
-            mark("leaving multiplayer preserves the current original career run")
+            assert first.locator("#solo-mode").get_attribute("aria-pressed")=="true"
+            mark("solo mode disconnects multiplayer without restarting the bus or original career")
 
             mobile=browser.new_context(viewport={"width":390,"height":844},is_mobile=True,has_touch=True,device_scale_factor=2)
             mp=mobile.new_page();attach(mp);mp.goto(BASE,wait_until="networkidle")
-            mp.locator("#play-tab").click()
-            assert mp.evaluate("document.documentElement.scrollHeight > innerHeight + 500")
+            mp.locator("#solo-mode").click()
+            assert not mp.locator("#dispatch-panel").is_visible()
             assert mp.evaluate("document.documentElement.scrollWidth <= innerWidth")
             assert mp.locator("#account-button").is_visible()
             assert mp.locator(".controls").is_visible()
+            original_menu(mp,touch=True)
+            mp.screenshot(path=str(OUT/"city-mobile-solo.png"),full_page=True)
+            original_start(mp,touch=True)
+            mp.locator("[data-action=pause]").tap()
+            wait(mp,"game.state==='pause'")
+            canvas_click(mp,320,380,touch=True)
+            wait(mp,"game.state==='play'")
+            mp.locator("#online-mode").click()
+            assert mp.evaluate("document.documentElement.scrollHeight > innerHeight + 500")
             mp.screenshot(path=str(OUT/"city-mobile.png"),full_page=True)
             mp.locator("#account-button").click()
             mp.locator("#username").fill("Mobile_Name")
             assert mp.evaluate("game.keys.up === false && game.keys.left === false")
-            mark("mobile scrolling layout, full-width game, touch controls and header profile")
+            mp.locator("#close-panel").click()
+            assert mp.evaluate("game.state==='play'")
+            mark("original touch garage/routes/start/pause, two modes, scrolling network panel and header profile")
 
             # Rotate/resize without replacing the game or losing the session.
             mp.set_viewport_size({"width":844,"height":390})

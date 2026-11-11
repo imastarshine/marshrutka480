@@ -40,7 +40,7 @@ class CitySession {
                 lateral:before.lateral+(p.lateral-before.lateral)*t, angle:before.angle+angleDelta*t};
         });
     }
-    onReset() { this.pendingSpawn = true; this.turnFrom = null; if(window.app)window.app.garageReturnState=null; }
+    onReset() { this.pendingSpawn = true; this.turnFrom = null; }
     captureTurn(g) { this.turnFrom = {wx:g.wx, wy:g.wy, angle:Math.atan2(g.dir[0], -g.dir[1])}; }
     pose(g) {
         let wx = g.wx, wy = g.wy, angle = Math.atan2(g.dir[0], -g.dir[1]);
