@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import re
 import secrets
 import sqlite3
@@ -25,7 +26,7 @@ from .database import Database
 from .middleware import SecurityMiddleware
 from .models import ActionMessage, AuthMessage, CityPoseMessage, CreateRoom, Credentials, EmptyBody, InputMessage, PingMessage
 from .city import CityRoom
-from .rooms import Connection, RoomManager
+from .rooms import Connection, PUBLIC_CITY_CODE, RoomManager
 from .security import RateLimiter, bounded_thread_work, hash_password, token_hash, verify_password
 
 logger = logging.getLogger("marshrutka")
@@ -107,7 +108,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok":True,"version":"2.1.2","protocol":1,"features":["original-city","world-poses","irkutsk-routes"]}
+        return {"ok":True,"version":"2.2.0-beta.1","protocol":1,"features":["original-city","world-poses","irkutsk-routes","osm-road-geometry","public-city","guest-access"]}
+
+    @app.post("/api/auth/guest", status_code=201)
+    async def guest(body: EmptyBody, request: Request):
+        rate("guest:" + ip(request), 30, 600)
+        # Guests have a session token but no password that could be guessed.
+        for _ in range(3):
+            try:
+                user = await asyncio.to_thread(app.state.db.create_user, "Водитель_" + secrets.token_hex(4), "!guest")
+                return await issue(user)
+            except sqlite3.IntegrityError:
+                continue
+        raise HTTPException(503, "Не удалось выдать позывной. Попробуйте ещё раз")
 
     @app.post("/api/auth/register",status_code=201)
     async def register(body: Credentials, request: Request):
@@ -148,6 +161,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def rooms():
         return {"rooms":[r.info() for r in app.state.rooms.rooms.values() if r.public]}
 
+    @app.get("/api/city")
+    async def public_city():
+        return {"room": app.state.rooms.public_city().info()}
+
+    @app.post("/api/city/join")
+    async def join_public_city(body: EmptyBody, user=Depends(identity)):
+        rate("join:" + str(user["id"]), 20)
+        room = app.state.rooms.join(user, PUBLIC_CITY_CODE)
+        return {"room": room.info()}
+
     @app.post("/api/rooms",status_code=201)
     async def create_room(body: CreateRoom, user=Depends(identity)):
         rate("rooms:"+str(user["id"]),12)
@@ -185,7 +208,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             while True:
                 message = await conn.queue.get()
-                await asyncio.wait_for(conn.socket.send_json(message),timeout=2)
+                send = conn.socket.send_text(message) if isinstance(message, str) else conn.socket.send_json(message)
+                await asyncio.wait_for(send,timeout=2)
         except (WebSocketDisconnect,RuntimeError,TimeoutError):
             with contextlib.suppress(Exception):
                 await conn.socket.close(code=4008,reason="Соединение слишком медленное")
@@ -200,7 +224,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await ws.close(code=4008)
             return
         pending = app.state.pending_ws
-        if pending.get(peer,0)>=4 or sum(pending.values())+len(app.state.rooms.connections)>=settings.max_connections:
+        if pending.get(peer,0)>=4 or (settings.max_connections and sum(pending.values())+len(app.state.rooms.connections)>=settings.max_connections):
             await ws.close(code=4008)
             return
         pending[peer] = pending.get(peer,0)+1
@@ -279,7 +303,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             if not isinstance(room, CityRoom):
                                 raise ValueError("City room required")
                             if not room.spawn(conn.user_id):
-                                conn.send({"type":"error","detail":"Подожди пару секунд перед новым рейсом"})
+                                remaining = 2 - (time.monotonic() - room.players[conn.user_id].last_spawn)
+                                conn.send({"type":"spawn_wait","retry_ms":max(100, math.ceil(remaining * 1000))})
+                            else:
+                                conn.send({"type":"spawned"})
                 except HTTPException as exc:
                     conn.send({"type":"error","detail":exc.detail})
                 except (ValidationError,ValueError,TypeError):

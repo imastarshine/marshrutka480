@@ -1,12 +1,15 @@
 # Сетевой протокол v1
 
 Все HTTP URL относительно `API_BASE` (пустая строка = этот же сервер). JSON UTF-8.
-Авторизация: `Authorization: Bearer <token>`. Токен хранится клиентом только в памяти.
+Авторизация: `Authorization: Bearer <token>`. Токен хранится клиентом в памяти
+и `sessionStorage` текущей вкладки; при восстановлении проверяется через `/api/auth/me`.
 Ошибка HTTP: `{"detail":"понятный текст"}`. Pydantic 422 также может вернуть массив ошибок.
 
 ## HTTP
 
-- `GET /api/health` → `{ok:true,version:"2.0.0",protocol:1,features:["original-city","world-poses"]}`.
+- `GET /api/health` → `{ok:true,version:"2.2.0",protocol:1,features:[...]}`.
+- `POST /api/auth/guest`, тело `{}` → `{token,expires_at,user:{id,username}}`;
+  сервер выдаёт уникальный гостевой позывной без пароля. Не более 30 выдач за 10 минут с IP.
 - `POST /api/auth/register`, `POST /api/auth/login`, тело `{username,password}` →
   `{token,expires_at,user:{id,username}}`. Имя 3–24, латиница/кириллица/цифры/`_-`; пароль 10–128 символов.
 - `GET /api/auth/me` → `{user:{id,username}}`.
@@ -14,13 +17,18 @@
 - `GET /api/leaderboard?limit=20` → `{entries:[{rank,username,score,stops,distance,completed_at}],mode:"online"}`.
   Лучший законченный рейс старого режима arcade. Комнаты city в рейтинг не входят.
 - `GET /api/rooms` → `{rooms:[ROOM]}` (только публичные).
+- `GET /api/city` → `{room:ROOM}` — постоянный общий город `IRKUTK`.
+- `POST /api/city/join`, тело `{}` с Bearer → `{room:ROOM}` — вход в общий город.
+  При выходе всех участников он сохраняется. После перезапуска в него можно войти заново.
 - `POST /api/rooms`, тело `{name:"Вечерний рейс",public:true,max_players:4,mode:"city"}` → `{room:ROOM}`.
   Комната создаётся с владельцем-участником. max_players 1–8. Непубличная доступна по коду.
   mode: `city|arcade`; по умолчанию arcade для совместимости старых клиентов.
 - `POST /api/rooms/CODE/join`, тело `{}` → `{room:ROOM}`.
 - `POST /api/rooms/CODE/leave`, тело `{}` → `{ok:true}`.
 
-`ROOM = {code,name,public,mode,max_players,host_id,status,players:[{id,username,connected}],count}`;
+`ROOM = {code,name,public,mode,shared,max_players,host_id,status,players:[{id,username,color,number,connected,state}],count}`;
+У общего города `shared:true`, `max_players:null`, `host_id:0`; численного лимита
+участников нет. Прочие комнаты имеют обычный численный `max_players`.
 status: `waiting|countdown|running|finished`. City сразу running и допускает поздний вход.
 Arcade допускает новых участников только в waiting/finished.
 
@@ -54,17 +62,24 @@ Arcade допускает новых участников только в waitin
 `{type:"correction",pose:последнее_принятое_положение}`. Клиент показывает
 сообщение; свою маршрутку сетевой снимок не перемещает.
 
-При начале нового рейса отправляется `{type:"spawn"}` (не чаще раза в 2 с),
-после него — новое положение. `ping` каждые 3 с, `horn` не чаще раза в 2 с,
+При начале нового рейса отправляется `{type:"spawn"}` (не чаще раза в 2 с).
+Сервер подтверждает `{type:"spawned"}`; только после подтверждения клиент
+начинает передавать новые положения. Ответ `{type:"spawn_wait",retry_ms}`
+просит повторить запрос после задержки, без отправки новой позиции до подтверждения.
+После переподключения текущее положение также подтверждается через spawn.
+`ping` каждые 3 с, `horn` не чаще раза в 2 с,
 `leave` работают как ниже. Команда `start` не нужна.
 
 Снимки приходят 10 раз/с:
 `{type:"state",room:ROOM,players:[CITY_PLAYER],seed,server_time,started_at,tick,
 results:[],ranked:false}`.
-`CITY_PLAYER` содержит `id,username,color,number,connected` и поля pose;
+`CITY_PLAYER` содержит `id,username,color,number,connected,pose_time` и поля pose;
+`pose_time` — серверное время последнего принятого положения, Unix-миллисекунды.
+`room.players` содержит только облегчённый список участников, без дублирования координат.
 до первого положения содержит только `state:"menu"`.
-Номер и цвет назначает сервер. Чужие маршрутки интерполируются в течение
-100 мс, своя маршрутка всегда использует непосредственный локальный ввод.
+Номер и цвет назначает сервер; цвета повторяются каждые восемь номеров.
+Чужие маршрутки отображаются из буфера снимков с задержкой 150 мс и короткой
+экстраполяцией при задержке пакетов. Своя маршрутка использует локальный ввод.
 Общее время и seed задают фазы светофоров. Повороты, двери, прыжки,
 положение на дороге и метки на миникарте отображаются исходным рендерером.
 

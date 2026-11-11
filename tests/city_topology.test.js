@@ -115,6 +115,12 @@ test("each selectable route has a connected directional path and ordered real st
         const itinerary = plain(run(`new CityGraph(IRKUTSK_CITY).itinerary(${JSON.stringify(num)})`));
         const expectedStops = route.stops.length + (route.loop ? 0 : (route.returnStops || route.stops).length);
         assert.equal(itinerary.stopCount, expectedStops, `${num}: every direction-specific stop is attached exactly once`);
+        assert.deepEqual(itinerary.legs.slice(0, route.path.length).flatMap(leg => leg.stops.map(stop => stop.name)),
+            route.stops.map(stop => stop.name), `${num}: the driven outbound stop order matches the published trip`);
+        if (route.returnStops) {
+            assert.deepEqual(itinerary.legs.slice(route.path.length).flatMap(leg => leg.stops.map(stop => stop.name)),
+                route.returnStops.map(stop => stop.name), `${num}: the driven return stop order matches the published trip`);
+        }
         const firstLeg = itinerary.legs[0], lastLeg = itinerary.legs.at(-1);
         assert.equal(routeLeg(lastLeg.edge, lastLeg.reverse).to,
             routeLeg(firstLeg.edge, firstLeg.reverse).from, `${num}: the trip returns to its first terminal`);
@@ -143,9 +149,12 @@ test("the route menu uses the verified Irkutsk termini and preserves purchased l
     assert.deepEqual(plain(run("Object.fromEntries(Object.entries(IRKUTSK_CITY.routes).map(([number,route])=>[number,route.termini]))")), {
         "33": ["Центральный рынок", "Батарейная"],
         "80": ["Областная больница", "Областная больница"],
+        "83": ["Радужный микрорайон", "Центральный рынок"],
+        "90": ["Аэропорт", "Аэропорт"],
         "480": ["Аэропорт", "Луговое"],
+        "Т4": ["Сквер им. Кирова", "Аэропорт"],
     });
-    for (const [oldNumber, replacement] of [["10", "80"], ["83", "80"], ["112", "33"]]) {
+    for (const [oldNumber, replacement] of [["10", "80"], ["83", "83"], ["112", "33"]]) {
         run(`localStorage.setItem(SAVE_KEY, JSON.stringify({wallet:1234,route:${JSON.stringify(oldNumber)},routes:['480',${JSON.stringify(oldNumber)}],upgrades:{engine:2},buses:['gazel','transit'],bus:'transit'}))`);
         const save = plain(run("loadSave()"));
         assert.equal(save.route, replacement);
@@ -191,7 +200,8 @@ function cornerGame() {
         edges:[
             {id:'north',from:'a',to:'b',street:'ул. Ленина',lanes:4},
             {id:'east',from:'b',to:'c',street:'ул. Карла Маркса',lanes:4},
-            {id:'remote',from:'c',to:'d',street:'ул. Советская',lanes:4}
+            {id:'remote',from:'c',to:'d',street:'ул. Советская',lanes:4},
+            {id:'branch',from:'b',to:'d',street:'ул. Седова',lanes:4}
         ],
         routes:{'480':{path:[{edge:'north'},{edge:'east'}],stops:[
             {name:'Сквер',edge:'north',at:0.5},
@@ -235,6 +245,20 @@ test("a turn requires the nearby connected intersection and preserves its exact 
     assert.equal(run("subject.cityLegIndex"), 1, "the actual neighboring street advances the route");
 });
 
+test("steering before a junction queues a turn without teleporting the bus", () => {
+    const { run } = cornerGame();
+    run("place('north',2840)");
+    assert.equal(run("subject.startTurn(1,junction('b'))"), true);
+    assert.deepEqual(plain(run("({edge:subject.cityEdge.id,x:subject.wx,y:subject.wy})")),
+        { edge: "north", x: 0, y: -2840 }, "steering cannot skip the last 160 units of the approach");
+    assert.equal(run("subject.advanceCity(100)"), 100);
+    assert.deepEqual(plain(run("({edge:subject.cityEdge.id,x:subject.wx,y:subject.wy})")),
+        { edge: "north", x: 0, y: -2940 });
+    run("subject.advanceCity(60)");
+    assert.deepEqual(plain(run("({edge:subject.cityEdge.id,x:subject.wx,y:subject.wy})")),
+        { edge: "east", x: 0, y: -3000 }, "the turn starts at the shared physical junction");
+});
+
 test("driving stops at a required turn and reverse cannot leave the mapped road", () => {
     const { run } = cornerGame();
     run("place('north',2800); subject.advanceCity(1000)");
@@ -269,7 +293,7 @@ test("stops stay on their street instead of being carried around the corner", ()
         [["Музей", "east", 1500]]);
 });
 
-test("the actual driving loop can follow every junction of all three real routes", () => {
+test("the actual driving loop can follow the mapped junctions of all six real routes", () => {
     const { run } = loadClient();
     const result = plain(run(`(() => {
         const failures = [];
@@ -278,26 +302,31 @@ test("the actual driving loop can follow every junction of all three real routes
             const game = new Game();
             game.save.route = route.num;
             game.reset();
+            game.drawWorld = () => {};
+            // Traffic and police do not determine map reachability.
+            for (const method of ['updateCars','updatePolice','updateWanted','checkCollisions','checkSlalom','updateMotorcade','spawnCar']) game[method] = () => {};
             const legs = game.cityItinerary.legs;
             for (let index = 0; index < legs.length; index++) {
-                game.reset();
-                game.drawWorld = () => {};
-                // Traffic and police are independent from whether a mapped
-                // route is physically navigable with the normal controls.
-                for (const method of ['updateCars','updatePolice','updateWanted','checkCollisions','checkSlalom','updateMotorcade','spawnCar']) game[method] = () => {};
                 const leg = legs[index], nextIndex = (index + 1) % legs.length, next = legs[nextIndex];
                 game.state = 'play';
                 game.cityLegIndex = index;
                 game.cityEdge = leg.edge;
                 game.cityReverse = leg.reverse;
-                game.cityOffset = leg.reverse ? 1000 : leg.edge.length - 1000;
-                game.dir = game.cityGraph.direction(leg.edge,leg.reverse);
+                game.cityOffset = leg.reverse ? Math.min(1000,leg.edge.length / 2) : leg.edge.length - Math.min(1000,leg.edge.length / 2);
+                game.dir = game.cityGraph.direction(leg.edge,leg.reverse,game.cityOffset);
                 [game.wx,game.wy] = game.cityGraph.position(leg.edge,game.cityOffset);
+                game.cityPendingTurn = null;
+                game.cityOffRoute = false;
+                game.cityTravel = 0;
                 game.streetK = leg.edge.index;
                 setRoad(leg.edge.lanes);
                 game.inters = [];
                 game.stops = [];
                 game.spawnedLines.clear();
+                game.spawnedCityStops.clear();
+                game.shifts = [];
+                game.openBelow = LANES / 2 - CLOSED;
+                game.bus.x = laneCenter(LANES - 1 - CLOSED);
                 game.bus.invuln = 100000;
                 game.bus.speed = 6;
                 game.districtLeft = Infinity;

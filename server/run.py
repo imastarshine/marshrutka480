@@ -41,7 +41,8 @@ def main() -> None:
         ws_ping_timeout=15,
         ws_per_message_deflate=False,
         timeout_keep_alive=5,
-        limit_concurrency=256,
+        # An optional operational ceiling, independent of private-room sizes.
+        limit_concurrency=int(os.getenv("M480_HTTP_CONCURRENCY", "0")) or None,
         proxy_headers=bool(args.proxy_ips),
         forwarded_allow_ips=args.proxy_ips,
         server_header=False,

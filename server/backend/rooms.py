@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import secrets
 import time
@@ -15,6 +16,7 @@ from .simulation import Room
 from .city import CityRoom
 
 logger = logging.getLogger("marshrutka.rooms")
+PUBLIC_CITY_CODE = "IRKUTK"
 
 
 @dataclass
@@ -28,7 +30,7 @@ class Connection:
     seq: int = -1
     last_horn: float = 0.0
 
-    def send(self, message: dict) -> None:
+    def send(self, message: dict | str) -> None:
         # A slow browser receives the latest world, never an unbounded backlog.
         if self.queue.full():
             with contextlib.suppress(asyncio.QueueEmpty):
@@ -46,14 +48,21 @@ class RoomManager:
         self.task: asyncio.Task | None = None
         self.closed = False
 
+    def public_city(self) -> CityRoom:
+        room = self.rooms.get(PUBLIC_CITY_CODE)
+        if room is None:
+            room = CityRoom(PUBLIC_CITY_CODE, "Общий Иркутск", True, None, 0, self.settings, shared=True)
+            self.rooms[PUBLIC_CITY_CODE] = room
+        return room
+
     def create(self, user: dict, name: str, public: bool, max_players: int, mode: str = "arcade") -> Room | CityRoom:
         if user["id"] in self.memberships:
             raise HTTPException(409,"Сначала покиньте текущую комнату")
-        if len(self.rooms) >= self.settings.max_rooms:
+        if sum(not getattr(room, "shared", False) for room in self.rooms.values()) >= self.settings.max_rooms:
             raise HTTPException(503,"Сервер заполнен. Попробуйте позже")
         alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         code = "".join(secrets.choice(alphabet) for _ in range(6))
-        while code in self.rooms:
+        while code in self.rooms or code == PUBLIC_CITY_CODE:
             code = "".join(secrets.choice(alphabet) for _ in range(6))
         room_type = CityRoom if mode == "city" else Room
         room = room_type(code,name,public,max_players,user["id"],self.settings)
@@ -62,8 +71,8 @@ class RoomManager:
         self.memberships[user["id"]] = code
         return room
 
-    def join(self, user: dict, code: str) -> Room:
-        room = self.rooms.get(code)
+    def join(self, user: dict, code: str) -> Room | CityRoom:
+        room = self.public_city() if code == PUBLIC_CITY_CODE else self.rooms.get(code)
         if not room:
             raise HTTPException(404,"Комната не найдена")
         current = self.memberships.get(user["id"])
@@ -73,7 +82,7 @@ class RoomManager:
             return room
         if not isinstance(room, CityRoom) and room.status not in {"waiting","finished"}:
             raise HTTPException(409,"Рейс уже начался. Дождитесь окончания")
-        if len([p for p in room.players.values() if not p.abandoned]) >= room.max_players:
+        if room.max_players is not None and len([p for p in room.players.values() if not p.abandoned]) >= room.max_players:
             raise HTTPException(409,"В комнате нет свободных мест")
         room.add(user)
         self.memberships[user["id"]] = code
@@ -85,7 +94,7 @@ class RoomManager:
             raise HTTPException(403,"Сначала войдите в комнату")
         if user["id"] in self.connections:
             raise HTTPException(409,"Этот аккаунт уже подключён в другом окне")
-        if len(self.connections) >= self.settings.max_connections:
+        if self.settings.max_connections and len(self.connections) >= self.settings.max_connections:
             raise HTTPException(503,"Сервер заполнен")
         p = room.players[user["id"]]
         if p.abandoned:
@@ -111,6 +120,8 @@ class RoomManager:
             self.transfer_host(room)
 
     def transfer_host(self, room: Room) -> None:
+        if getattr(room, "shared", False):
+            return
         host = room.players.get(room.host_id)
         if host and host.connected and not host.abandoned:
             return
@@ -137,7 +148,7 @@ class RoomManager:
                 else:
                     room.players.pop(user_id,None)
             self.transfer_host(room)
-            if not any(not p.abandoned for p in room.players.values()):
+            if not getattr(room, "shared", False) and not any(not p.abandoned for p in room.players.values()):
                 self.rooms.pop(code,None)
 
     async def leave(self, user_id: int, code: str) -> None:
@@ -159,10 +170,10 @@ class RoomManager:
         room = self.rooms.get(conn.room_code)
         if not room:
             raise HTTPException(404,"Комната закрыта")
-        if room.host_id != conn.user_id:
-            raise HTTPException(403,"Рейс запускает владелец комнаты")
         if isinstance(room, CityRoom):
             return
+        if room.host_id != conn.user_id:
+            raise HTTPException(403,"Рейс запускает владелец комнаты")
         if room.status not in {"waiting","finished"}:
             raise HTTPException(409,"Рейс уже запущен")
         if room.status == "finished" and not room.persisted:
@@ -170,9 +181,11 @@ class RoomManager:
         room.start()
 
     def broadcast(self, code: str, message: dict) -> None:
+        # Encode a shared world once, not once per connected driver.
+        payload = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
         for conn in list(self.connections.values()):
             if conn.room_code == code:
-                conn.send(message)
+                conn.send(payload)
 
     async def run(self) -> None:
         tick = 0

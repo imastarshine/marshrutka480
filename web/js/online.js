@@ -5,6 +5,10 @@ class CitySession {
         this.playerId = null;
         this.state = null;
         this.previous = new Map();
+        this.samples = new Map();
+        this.serverPerfOffset = null;
+        this.lastRenderTime = -Infinity;
+        this.renderDelay = 150;
         this.received = 0;
         this.buses = new Map();
         this.horns = new Map();
@@ -16,28 +20,69 @@ class CitySession {
     }
     get active() { return Boolean(this.state?.room?.mode === "city"); }
     clear() {
-        this.state = null; this.previous.clear(); this.buses.clear(); this.horns.clear();
+        this.state = null; this.previous.clear(); this.samples.clear(); this.buses.clear(); this.horns.clear();
+        this.serverPerfOffset = null; this.lastRenderTime = -Infinity;
         this.turnFrom = null; this.mapMarkersCount = 0; this.drawnPlayers = 0;
     }
     receive(state) {
         if (state.room?.mode !== "city") return;
         const now = performance.now();
-        this.previous = new Map(this.players(now).map(p => [p.id, p]));
+        if (this.state && (this.state.room.code !== state.room.code || this.state.seed !== state.seed)) {
+            this.samples.clear(); this.serverPerfOffset = null; this.lastRenderTime = -Infinity;
+        }
+        const packetTime = Number.isFinite(state.server_time) ? state.server_time * 1000 : Date.now();
+        const observedOffset = packetTime - now;
+        this.serverPerfOffset = this.serverPerfOffset === null ? observedOffset
+            : this.serverPerfOffset + clamp(observedOffset - this.serverPerfOffset, -2, 2) * 0.2;
+        for (const player of state.players || []) {
+            if (!Number.isFinite(player.wx) || !Number.isFinite(player.wy)) continue;
+            const time = Number.isFinite(player.pose_time) ? player.pose_time : packetTime;
+            let samples = this.samples.get(player.id) || [];
+            const before = samples.at(-1), elapsed = before ? Math.max(0, time - before.time) / 1000 : 0;
+            if (before && Math.hypot(player.wx - before.pose.wx, player.wy - before.pose.wy) > Math.max(900, elapsed * 1400 + 300)) samples = [];
+            if (!samples.length || time > samples.at(-1).time) samples.push({ time, pose: player });
+            else if (time === samples.at(-1).time) samples[samples.length - 1] = { time, pose: player };
+            this.samples.set(player.id, samples.slice(-20));
+            if (before) this.previous.set(player.id, before.pose);
+        }
         this.state = state;
         this.received = now;
         this.clockOffset = state.server_time * 1000 - Date.now();
-        const ids = new Set(state.players.map(p => p.id));
+        const ids = new Set((state.players || []).map(p => p.id));
         for (const id of this.buses.keys()) if (!ids.has(id)) this.buses.delete(id);
         for (const id of this.horns.keys()) if (!ids.has(id)) this.horns.delete(id);
+        for (const id of this.samples.keys()) if (!ids.has(id)) { this.samples.delete(id); this.previous.delete(id); }
     }
     players(now = performance.now()) {
-        const t = clamp((now - this.received) / 100, 0, 1);
-        return (this.state?.players || []).filter(p => p.id !== this.playerId && Number.isFinite(p.wx)).map(p => {
-            const before = this.previous.get(p.id);
-            if (!before || Math.hypot(p.wx - before.wx, p.wy - before.wy) > 900) return p;
-            const angleDelta = Math.atan2(Math.sin(p.angle - before.angle), Math.cos(p.angle - before.angle));
-            return {...p, wx:before.wx+(p.wx-before.wx)*t, wy:before.wy+(p.wy-before.wy)*t,
-                lateral:before.lateral+(p.lateral-before.lateral)*t, angle:before.angle+angleDelta*t};
+        const target = Math.max(this.lastRenderTime, now + (this.serverPerfOffset ?? 0) - this.renderDelay);
+        this.lastRenderTime = target;
+        return (this.state?.players || []).filter(p => p.id !== this.playerId && Number.isFinite(p.wx) && Number.isFinite(p.wy)).map(p => {
+            const samples = this.samples.get(p.id) || [];
+            if (!samples.length) return p;
+            let before = samples[0], after = null;
+            for (const sample of samples) {
+                if (sample.time <= target) before = sample;
+                else { after = sample; break; }
+            }
+            if (after && after !== before) {
+                const t = clamp((target - before.time) / Math.max(1, after.time - before.time), 0, 1);
+                const a = before.pose, b = after.pose;
+                const delta = Math.atan2(Math.sin(b.angle - a.angle), Math.cos(b.angle - a.angle));
+                return { ...p, ...a, connected: p.connected, wx: a.wx + (b.wx - a.wx) * t, wy: a.wy + (b.wy - a.wy) * t,
+                    lateral: a.lateral + (b.lateral - a.lateral) * t, angle: a.angle + delta * t,
+                    jump: (a.jump || 0) + ((b.jump || 0) - (a.jump || 0)) * t,
+                    door: (a.door || 0) + ((b.door || 0) - (a.door || 0)) * t };
+            }
+            const latest = samples.at(-1), old = samples.at(-2), pose = latest.pose;
+            const ahead = clamp(target - latest.time, 0, 100) / 1000;
+            if (old && pose.state === "play" && Math.abs(pose.speed || 0) > 0.1 && ahead) {
+                const seconds = Math.max(0.02, (latest.time - old.time) / 1000);
+                let vx = (pose.wx - old.pose.wx) / seconds, vy = (pose.wy - old.pose.wy) / seconds;
+                const ratio = Math.min(1, 1250 / Math.max(1, Math.hypot(vx, vy)));
+                vx *= ratio; vy *= ratio;
+                return { ...p, ...pose, connected: p.connected, wx: pose.wx + vx * ahead, wy: pose.wy + vy * ahead };
+            }
+            return { ...p, ...before.pose, connected: p.connected };
         });
     }
     onReset() { this.pendingSpawn = true; this.turnFrom = null; }
@@ -53,7 +98,7 @@ class CitySession {
         }
         return {wx,wy,lateral:g.bus.x-roadMiddle(),angle:Math.atan2(Math.sin(angle),Math.cos(angle)),
             speed:g.state==="play"?g.bus.speed:0,jump:g.bus.z,door:g.bus.doorOpen,braking:g.bus.braking,
-            bus:g.model.key,route:g.route.num,state:g.state,street:g.currentStreet()};
+            bus:g.model.key,route:g.route.num,state:g.state,street:g.currentStreet().slice(0,60)};
     }
     beforeTick(g) {
         if (!this.active) return;
@@ -73,9 +118,12 @@ class CitySession {
     }
     project(g,p) {
         const [wx,wy] = this.worldPosition(p), dx = wx-g.wx, dy = wy-g.wy;
-        return {x:roadMiddle()-g.dir[1]*dx+g.dir[0]*dy,
-            y:g.bus.centerY-g.dir[0]*dx-g.dir[1]*dy,
-            angle:p.angle-Math.atan2(g.dir[0],-g.dir[1])};
+        const direction = g.cameraDir || g.dir;
+        const y = g.bus.centerY-direction[0]*dx-direction[1]*dy;
+        // Called after road-strip warping: one geographic projection for buses
+        // and labels, without applying the road's bend to peers a second time.
+        return {x:roadMiddle()-direction[1]*dx+direction[0]*dy, y,
+            angle:p.angle-Math.atan2(direction[0],-direction[1])};
     }
     drawPlayers(g) {
         this.drawnPlayers = 0;
@@ -104,17 +152,20 @@ class CitySession {
             ctx.restore();this.drawnPlayers++;
         }
     }
-    drawMinimap(g,{bx,by,size,toMap,cx,cy}) {
+    drawMinimap(g,{bx,by,size,toMap,cx,cy,width=size,height=size,overview=false}) {
         this.mapMarkersCount=0;
         if (!this.active) return;
+        const occupied = new Map();
         for (const p of this.players()) {
-            if (!this.visible(p)) continue;
             let [x,y]=toMap(...this.worldPosition(p));
-            const dx=x-cx,dy=y-cy,edge=size/2-12;
-            const outside=Math.max(Math.abs(dx),Math.abs(dy))>edge;
-            if (outside) {const k=edge/Math.max(Math.abs(dx),Math.abs(dy));x=cx+dx*k;y=cy+dy*k;}
+            const dx=x-cx,dy=y-cy,edgeX=width/2-12,edgeY=height/2-12;
+            const outside=Math.abs(dx)>edgeX || Math.abs(dy)>edgeY;
+            if (outside) {const k=Math.min(1,edgeX/Math.max(1,Math.abs(dx)),edgeY/Math.max(1,Math.abs(dy)));x=cx+dx*k;y=cy+dy*k;}
+            const anchor=[x,y], cell=`${Math.round(x/13)}:${Math.round(y/13)}`, count=occupied.get(cell)||0;
+            occupied.set(cell,count+1);
+            if(count){x=clamp(x-(Math.floor(count/5)+1)*13,bx+12,bx+width-12);y=clamp(y+((count%5)-2)*13,by+12,by+height-12);line(anchor[0],anchor[1],x,y,this.color(p),1,.7);}
             const color=this.color(p);
-            ctx.save();ctx.globalAlpha=p.connected?1:.4;
+            ctx.save();ctx.globalAlpha=p.connected!==false?1:.4;
             if (outside) {
                 const a=Math.atan2(dy,dx);
                 poly([[x+Math.cos(a)*9,y+Math.sin(a)*9],[x+Math.cos(a+2.4)*7,y+Math.sin(a+2.4)*7],[x+Math.cos(a-2.4)*7,y+Math.sin(a-2.4)*7]],color);
@@ -123,9 +174,17 @@ class CitySession {
                 line(x+Math.sin(p.angle)*8,y-Math.cos(p.angle)*8,x+Math.sin(p.angle)*13,y-Math.cos(p.angle)*13,color,2);
             }
             text(String(p.number),x,y,color,10,{bold:true,align:"center",base:"middle"});
-            const labelX=clamp(x+12,bx+4,bx+size-60);
-            text(p.username.slice(0,8),labelX,clamp(y-19,by+4,by+size-14),color,9,{bold:true,shadow:true});
+            const label=String(p.username||"Водитель").slice(0,overview?24:8), labelWidth=textWidth(label,overview?11:9,true);
+            const labelX=clamp(x+12,bx+4,bx+width-labelWidth-4),labelY=clamp(y-19,by+4,by+height-15);
+            fillRect(labelX-2,labelY-1,labelWidth+5,overview?15:12,[10,21,29],.85,2);
+            text(label,labelX,labelY,color,overview?11:9,{bold:true,shadow:true});
             ctx.restore();this.mapMarkersCount++;
         }
+    }
+    drawOverview(g,{area,toMap}) {
+        ctx.save();ctx.beginPath();ctx.rect(area.x,area.y,area.w,area.h);ctx.clip();
+        this.drawMinimap(g,{bx:area.x,by:area.y,size:area.h,width:area.w,height:area.h,toMap,
+            cx:area.x+area.w/2,cy:area.y+area.h/2,overview:true});
+        ctx.restore();
     }
 }

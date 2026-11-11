@@ -11,6 +11,11 @@ def pose(seq=1, **changes):
 
 
 class OriginalCityTests(AppCase):
+    def test_all_geographic_routes_can_send_city_pose(self):
+        for route in ("480", "80", "90", "83", "33", "Т4"):
+            with self.subTest(route=route):
+                self.assertEqual(CityPoseMessage.model_validate(pose(route=route)).route, route)
+
     def city(self, session, name="Original city"):
         response=self.client.post('/api/rooms', headers=self.auth(session),
             json={"name":name,"public":False,"max_players":8,"mode":"city"})

@@ -773,6 +773,7 @@ class GameUpdate extends GameCore {
         bus.update(this.keys);
         // тупик: дальше не проехать, только повернуть
         for (const inter of this.inters) {
+            if (inter.k !== this.nextCross().k) continue;
             const room = bus.y - (inter.y + 6);
             if (!this.cityPendingTurn && !this.cityTurnaround() && !inter.arms.straight &&
                 (inter.arms.left || inter.arms.right) && bus.speed > room && room > -200) {
@@ -794,6 +795,7 @@ class GameUpdate extends GameCore {
         } else this.wrongWay = 0;
 
         const travelled = this.advanceCity(bus.speed);
+        this.updateCameraDirection();
         this.distance += Math.abs(travelled);
         this.scroll += travelled;
         if (this.state === "turning") return;

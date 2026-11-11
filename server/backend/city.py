@@ -27,6 +27,7 @@ class CityPlayer:
     disconnected_at: float | None = field(default_factory=time.monotonic)
     pose: dict | None = None
     pose_at: float = 0.0
+    pose_time: int = 0
     last_spawn: float = 0.0
     keys: dict = field(default_factory=dict)
     input_age: float = 0.0
@@ -34,18 +35,20 @@ class CityPlayer:
     def clear_input(self):
         self.keys.clear()
 
-    def snapshot(self):
+    def snapshot(self, *, position=True):
         return {"id": self.id, "username": self.username, "color": self.color,
                 "number": self.number, "connected": self.connected,
-                **(self.pose or {"state": "menu"})}
+                **(self.pose if position and self.pose else {"state": (self.pose or {}).get("state", "menu")}),
+                **({"pose_time": self.pose_time} if position else {})}
 
 
 class CityRoom:
     mode = "city"
 
-    def __init__(self, code: str, name: str, public: bool, max_players: int, host_id: int, settings: Settings):
+    def __init__(self, code: str, name: str, public: bool, max_players: int | None, host_id: int, settings: Settings, *, shared=False):
         self.code, self.name, self.public = code, name, public
         self.max_players, self.host_id, self.settings = max_players, host_id, settings
+        self.shared = shared
         self.players: dict[int, CityPlayer] = {}
         self.status = "running"
         self.round_id = secrets.token_hex(12)
@@ -56,12 +59,15 @@ class CityRoom:
 
     def add(self, user):
         occupied = {p.number for p in self.players.values() if not p.abandoned}
-        number = next(n for n in range(1, 9) if n not in occupied)
-        self.players[user["id"]] = CityPlayer(user["id"], user["username"], COLORS[number - 1], number)
+        number = 1
+        while number in occupied:
+            number += 1
+        self.players[user["id"]] = CityPlayer(user["id"], user["username"], COLORS[(number - 1) % len(COLORS)], number)
 
     def info(self):
-        players = [p.snapshot() for p in self.players.values() if not p.abandoned]
+        players = [p.snapshot(position=False) for p in self.players.values() if not p.abandoned]
         return {"code": self.code, "name": self.name, "public": self.public,
+                "shared": self.shared,
                 "mode": self.mode, "max_players": self.max_players, "host_id": self.host_id,
                 "status": self.status, "count": len(players), "players": players}
 
@@ -69,7 +75,8 @@ class CityRoom:
         self.tick += 1
 
     def snapshot(self):
-        return {"type": "state", "room": self.info(), "players": self.info()["players"],
+        return {"type": "state", "room": self.info(),
+                "players": [p.snapshot() for p in self.players.values() if not p.abandoned],
                 "seed": self.seed, "server_time": time.time(), "started_at": self.started_at,
                 "tick": self.tick, "results": [], "ranked": False}
 
@@ -81,6 +88,7 @@ class CityRoom:
         player.last_spawn = now
         player.pose = None
         player.pose_at = now
+        player.pose_time = int(time.time() * 1000)
         return True
 
     def update_pose(self, user_id, message):
@@ -97,5 +105,6 @@ class CityRoom:
             if distance > 1200 * elapsed + allowance:
                 return False
         player.pose, player.pose_at = pose, now
+        player.pose_time = int(time.time() * 1000)
         self.last_active = now
         return True

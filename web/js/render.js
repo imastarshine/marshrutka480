@@ -195,7 +195,6 @@ class GameRender extends GameUpdate {
         this.drawMotorcade();
         if (this.police) this.police.draw(this.frame);
         for (const i of this.inters) i.drawLights(this.frame);
-        window.citySession?.drawPlayers(this);
         for (const p of this.particles) if (p.world) p.draw();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx = screenCtx;
@@ -206,6 +205,7 @@ class GameRender extends GameUpdate {
             const dx = this.bendOffset(y + SLICE / 2);
             ctx.drawImage(worldCanvas, 0, y, worldCanvas.width, SLICE, dx - MARGIN, y, worldCanvas.width, SLICE + 0.5);
         }
+        window.citySession?.drawPlayers(this);
         if (this.heli) this.heli.drawLight(this.bus.x, this.bus.centerY);
         if (withBus) this.bus.draw(this.frame, { x: this.bus.x, y: this.bus.centerY, angle: this.bendAngle() });
         if (this.heli && withBus) this.heli.draw();
@@ -281,9 +281,9 @@ class GameRender extends GameUpdate {
         ctx.beginPath();
         ctx.rect(bx, by, size, size);
         ctx.clip();
-        const routeEdges = new Set(this.cityItinerary.legs.map((leg) => leg.edge.id));
+        const routeEdges = this.cityRouteEdges;
         const radius = size / scale / 2 + 20;
-        for (const edge of this.cityGraph.edges.values()) {
+        for (const edge of this.cityGraph.nearbyEdges(this.wx, this.wy, radius)) {
             if (edge.bounds.minX > this.wx + radius || edge.bounds.maxX < this.wx - radius ||
                 edge.bounds.minY > this.wy + radius || edge.bounds.maxY < this.wy - radius) continue;
             for (let index = 1; index < edge.geometry.length; index++) {
@@ -324,15 +324,43 @@ class GameRender extends GameUpdate {
         const nw = Math.min(WIDTH - 12, textWidth(navigation, 12, true) + 18);
         panel(bx, by - 29, nw, 23, 0.84, this.cityOffRoute ? ORANGE : BLUE);
         text(navigation, bx + 8, by - 24, this.cityOffRoute ? ORANGE : WHITE, 12, { bold: true });
+        this.drawExitSelector();
+    }
+
+    drawExitSelector() {
+        const area = this.exitSelectorRect(), options = this.cityOptions();
+        const selected = this.selectedCityExit(options);
+        const arrow = { left: "←", right: "→", straight: "↑", uturn: "↶" };
+        const label = selected
+            ? `${arrow[selected.side]} ${selected.edge.street} · Газ — выполнить`
+            : options.choices.length ? `Q/E · выбрать съезд · ${options.choices.length} выезда · нажми здесь`
+                : "Нет разрешённого выезда · M — карта, Esc — пауза";
+        panel(area.x, area.y, area.w, area.h, 0.9, selected ? YELLOW : [96, 126, 144]);
+        const size = Math.min(12, (area.w - 18) / Math.max(1, textWidth(label, 12, true)) * 12);
+        text(label, area.x + 9, area.y + 8, selected ? YELLOW : [193, 210, 220], size, { bold: true });
     }
 
     drawRouteOverview() {
+        const cached = this.routeOverviewCache;
+        if (cached?.graph === this.cityGraph && cached.route === this.route.num &&
+            cached.x === this.wx && cached.y === this.wy) {
+            ctx.drawImage(cached.canvas, 0, 0);
+            this.drawRouteOverviewPlayers(cached.view);
+            return;
+        }
+        const target = ctx, mapCanvas = document.createElement("canvas");
+        mapCanvas.width = WIDTH;
+        mapCanvas.height = HEIGHT;
+        ctx = mapCanvas.getContext("2d");
         const palette = [[226, 142, 104], [92, 206, 163], [122, 174, 255], [235, 135, 175], [200, 164, 245], [90, 210, 225]];
         const routes = Object.entries(this.cityGraph.data.routes);
         const area = rect(22, 116, WIDTH - 44, 414);
         const points = [...this.cityGraph.nodes.values()];
-        const minX = Math.min(...points.map((point) => point.x)), maxX = Math.max(...points.map((point) => point.x));
-        const minY = Math.min(...points.map((point) => point.y)), maxY = Math.max(...points.map((point) => point.y));
+        const bounds = points.reduce((box, point) => ({
+            minX: Math.min(box.minX, point.x), maxX: Math.max(box.maxX, point.x),
+            minY: Math.min(box.minY, point.y), maxY: Math.max(box.maxY, point.y),
+        }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+        const { minX, maxX, minY, maxY } = bounds;
         const scale = Math.min((area.w - 30) / Math.max(1, maxX - minX), (area.h - 30) / Math.max(1, maxY - minY));
         const toMap = (x, y) => [area.x + area.w / 2 + (x - (minX + maxX) / 2) * scale,
             area.y + area.h / 2 + (y - (minY + maxY) / 2) * scale];
@@ -364,19 +392,13 @@ class GameRender extends GameUpdate {
                 if (edge) drawEdge(edge, selected ? YELLOW : item.color, selected ? 3 : 1.5, selected ? 1 : 0.62);
             }
         }
-        const [px, py] = toMap(this.wx, this.wy), [dx, dy] = this.dir;
-        circle(px, py, 9, [5, 15, 22], 0.9);
-        poly([[px + dx * 8, py + dy * 8], [px - dx * 5 - dy * 5, py - dy * 5 + dx * 5],
-            [px - dx * 5 + dy * 5, py - dy * 5 - dx * 5]], YELLOW);
-        const labelX = clamp(px + 12, area.x + 8, area.x + area.w - 84), labelY = clamp(py - 22, area.y + 8, area.y + area.h - 22);
-        fillRect(labelX - 4, labelY - 3, 78, 20, [7, 18, 26], 0.94, 4);
-        text("Вы здесь", labelX, labelY, WHITE, 12, { bold: true });
         ctx.restore();
         const metersPerUnit = this.cityGraph.data.metersPerUnit || METERS_PER_PX;
         const barMeters = [200, 500, 1000, 2000, 5000, 10000].find((meters) => meters / metersPerUnit * scale >= 60) || 10000;
         const barWidth = barMeters / metersPerUnit * scale;
         line(area.x + 14, area.y + area.h - 18, area.x + 14 + barWidth, area.y + area.h - 18, [197, 215, 225], 2);
         text(barMeters >= 1000 ? `${barMeters / 1000} км` : `${barMeters} м`, area.x + 14, area.y + area.h - 36, [197, 215, 225], 10);
+        text("© OpenStreetMap contributors", area.x + area.w - 12, area.y + area.h - 15, [145, 168, 182], 9, { align: "right" });
         routes.forEach(([number, route], index) => {
             const x = 24 + index % 2 * 305, y = 553 + Math.floor(index / 2) * 48;
             const selected = number === this.route.num, color = selected ? YELLOW : palette[index % palette.length];
@@ -387,6 +409,23 @@ class GameRender extends GameUpdate {
         });
         text("Жёлтая линия — ваш маршрут · остальные линии — городские рейсы", 24, 711, [145, 168, 182], 11);
         text("Рейс на паузе. M или нажатие — вернуться за руль", 24, 733, [204, 216, 225], 12);
+        ctx = target;
+        this.routeOverviewCache = { graph: this.cityGraph, route: this.route.num, x: this.wx, y: this.wy, canvas: mapCanvas, view: { area, toMap } };
+        ctx.drawImage(mapCanvas, 0, 0);
+        this.drawRouteOverviewPlayers(this.routeOverviewCache.view);
+    }
+
+    drawRouteOverviewPlayers(view) {
+        if (!view) return;
+        window.citySession?.drawOverview(this, view);
+        const { area, toMap } = view;
+        const [px, py] = toMap(this.wx, this.wy), [dx, dy] = this.dir;
+        circle(px, py, 9, [5, 15, 22], 0.9);
+        poly([[px + dx * 8, py + dy * 8], [px - dx * 5 - dy * 5, py - dy * 5 + dx * 5],
+            [px - dx * 5 + dy * 5, py - dy * 5 - dx * 5]], YELLOW);
+        const labelX = clamp(px + 12, area.x + 8, area.x + area.w - 84), labelY = clamp(py - 22, area.y + 8, area.y + area.h - 22);
+        fillRect(labelX - 4, labelY - 3, 78, 20, [7, 18, 26], 0.94, 4);
+        text("Вы здесь", labelX, labelY, WHITE, 12, { bold: true });
     }
 
     drawHud() {

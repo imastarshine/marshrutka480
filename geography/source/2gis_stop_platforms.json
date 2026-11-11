@@ -1,0 +1,122 @@
+{
+  "checkedAt": "2026-11-11",
+  "verification": "Coordinates read from the visible public 2GIS interface by the root agent; retained separately from OSM identities.",
+  "platforms": [
+    {
+      "id": "70030076137485849",
+      "requestedPlatformId": "1548795341966952",
+      "name": "Библиотека им. Распутина (по требованию)",
+      "lat": 52.251705,
+      "lon": 104.263418,
+      "source": "https://2gis.ru/irkutsk/station/70030076137485849",
+      "requestedSource": "https://2gis.ru/irkutsk/platform/1548795341966952",
+      "observedBy": "root",
+      "coordinateEvidence": "Visible Маршрут link with coordinates 104.263418,52.251705 after the platform redirected to this station.",
+      "route": "83",
+      "direction": "return",
+      "stopIndex": 4
+    },
+    {
+      "name": "Инфекционная больница",
+      "id": "1548898350923989",
+      "lat": 52.25933,
+      "lon": 104.200232,
+      "source": "https://2gis.ru/irkutsk/station/1548898350923989",
+      "observedBy": "root",
+      "coordinateEvidence": "https://2gis.ru/irkutsk/directions/points/%7C104.200232%2C52.25933%3B1548898350923989"
+    },
+    {
+      "name": "Тимирязева",
+      "id": "1548795476149830",
+      "lat": 52.284903,
+      "lon": 104.298952,
+      "source": "https://2gis.ru/irkutsk/platform/1548795476149830",
+      "observedBy": "root",
+      "coordinateEvidence": "https://2gis.ru/irkutsk/directions/points/%7C104.298952%2C52.284903%3B1548795476149830"
+    },
+    {
+      "id": "70030076325428088",
+      "requestedPlatformId": "1548795539641193",
+      "name": "Луговое",
+      "lat": 52.25486,
+      "lon": 104.182919,
+      "source": "https://2gis.ru/irkutsk/station/70030076325428088",
+      "requestedSource": "https://2gis.ru/irkutsk/platform/1548795539641193",
+      "observedBy": "root",
+      "coordinateEvidence": "Visible Маршрут link with coordinates 104.182919,52.25486",
+      "route": "480",
+      "direction": "return",
+      "stopIndex": 0
+    },
+    {
+      "id": "1548796406457962",
+      "requestedPlatformId": "1548796406457962",
+      "name": "Больница",
+      "lat": 52.256246,
+      "lon": 104.180926,
+      "source": "https://2gis.ru/irkutsk/platform/1548796406457962",
+      "requestedSource": "https://2gis.ru/irkutsk/platform/1548796406457962",
+      "observedBy": "root",
+      "coordinateEvidence": "Visible Маршрут link with coordinates 104.180926,52.256246",
+      "route": "480",
+      "direction": "return",
+      "stopIndex": 1
+    },
+    {
+      "id": "1548795271710020",
+      "requestedPlatformId": "1548795271710020",
+      "name": "Луговое",
+      "lat": 52.260526,
+      "lon": 104.187752,
+      "source": "https://2gis.ru/irkutsk/platform/1548795271710020",
+      "requestedSource": "https://2gis.ru/irkutsk/platform/1548795271710020",
+      "observedBy": "root",
+      "coordinateEvidence": "Visible Маршрут link with coordinates 104.187752,52.260526",
+      "route": "480",
+      "direction": "return",
+      "stopIndex": 2
+    },
+    {
+      "id": "1548795299284990",
+      "requestedPlatformId": "1548795299284990",
+      "name": "Луговое",
+      "lat": 52.260512,
+      "lon": 104.187031,
+      "source": "https://2gis.ru/irkutsk/platform/1548795299284990",
+      "requestedSource": "https://2gis.ru/irkutsk/platform/1548795299284990",
+      "observedBy": "root",
+      "coordinateEvidence": "Visible Маршрут link with coordinates 104.187031,52.260512",
+      "route": "480",
+      "direction": "outbound",
+      "stopIndex": 37
+    },
+    {
+      "id": "1548795539641338",
+      "requestedPlatformId": "1548795539641338",
+      "name": "Больница",
+      "lat": 52.255618,
+      "lon": 104.181751,
+      "source": "https://2gis.ru/irkutsk/platform/1548795539641338",
+      "requestedSource": "https://2gis.ru/irkutsk/platform/1548795539641338",
+      "observedBy": "root",
+      "coordinateEvidence": "Visible Маршрут link with coordinates 104.181751,52.255618",
+      "route": "480",
+      "direction": "outbound",
+      "stopIndex": 38
+    },
+    {
+      "id": "70030076325428088",
+      "requestedPlatformId": "1548795539641193",
+      "name": "Луговое",
+      "lat": 52.25486,
+      "lon": 104.182919,
+      "source": "https://2gis.ru/irkutsk/station/70030076325428088",
+      "requestedSource": "https://2gis.ru/irkutsk/platform/1548795539641193",
+      "observedBy": "root",
+      "coordinateEvidence": "Visible Маршрут link with coordinates 104.182919,52.25486",
+      "route": "480",
+      "direction": "outbound",
+      "stopIndex": 39
+    }
+  ]
+}

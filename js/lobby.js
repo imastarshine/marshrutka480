@@ -291,6 +291,14 @@ class Game extends GameRender {
 
     // --- ввод ---
     onKey(code, down) {
+        if (code === "KeyQ" || code === "KeyE") {
+            this.exitKeysHeld ||= {};
+            if (!down) { this.exitKeysHeld[code] = false; return; }
+            if (this.exitKeysHeld[code]) return;
+            this.exitKeysHeld[code] = true;
+            if (!this.mapOverview && this.state === "play") this.cycleCityExit(code === "KeyQ" ? -1 : 1);
+            return;
+        }
         if (code === "KeyM") {
             if (!down) { this.mapKeyHeld = false; return; }
             if (this.mapKeyHeld) return;
@@ -346,6 +354,10 @@ class Game extends GameRender {
 
     onClick(x, y) {
         if (this.mapOverview) { this.toggleRouteMap(); return; }
+        if (this.state === "play" && hit(rect(x, y, 1, 1), this.exitSelectorRect())) {
+            this.cycleCityExit(1);
+            return;
+        }
         if (["play", "pause"].includes(this.state) && hit(rect(x, y, 1, 1), this.minimapRect())) {
             this.toggleRouteMap();
             return;

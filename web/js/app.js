@@ -8,6 +8,8 @@ class MarshrutkaApp {
         this.reconnectTimer=null;this.reconnectDeadline=0;this.reconnectAttempt=0;
         this.connectionVersion=0;this.roomRequest=false;this.lastHorn=0;this.lastRoster="";
         this.pendingCode=null;this.toastTimer=null;this.base="";
+        this.publicWanted=false;this.publicJoining=false;this.cityCount=null;this.intent=0;
+        this.restoreTask=null;this.sessionKey="m480.auth.session";this.spawnRetryAt=0;
         try{
             const raw=(window.MARSHRUTKA_CONFIG?.API_BASE||"").trim();
             if(raw){const u=new URL(raw);if(!["http:","https:"].includes(u.protocol)||u.username||u.password||u.search||u.hash)throw Error();this.base=u.origin;}
@@ -18,15 +20,18 @@ class MarshrutkaApp {
         setInterval(()=>{if(this.socketReady)this.send({type:"ping",t:Date.now()});},3000);
         setInterval(()=>{this.refreshChrome();this.renderRoster();},500);
         setInterval(()=>{if(this.panelView==="friends"&&!this.room&&this.healthy)this.loadRooms();},15000);
+        setInterval(()=>{if(this.healthy&&!this.room?.shared)this.loadPublicCity();},15000);
         const code=new URLSearchParams(location.search).get("room");
-        if(code&&/^[A-Z2-9]{6}$/i.test(code)){this.pendingCode=code.toUpperCase();this.el("room-code").value=this.pendingCode;this.openPanel("friends");this.status("room-status","Приглашение открыто. Войди, чтобы присоединиться.");}
+        if(code?.toUpperCase()==="IRKUTK")this.joinPublicCity();
+        else if(code&&/^[A-Z2-9]{6}$/i.test(code)){this.pendingCode=code.toUpperCase();this.el("room-code").value=this.pendingCode;this.openPanel("friends");this.status("room-status","Приглашение открыто. Войди, чтобы присоединиться.");}
     }
     el(id){return document.getElementById(id);}
     status(id,message,error=false){const el=this.el(id);el.textContent=message;el.classList.toggle("error",error);}
     toast(message){const el=this.el("toast");el.textContent=message;el.hidden=false;clearTimeout(this.toastTimer);this.toastTimer=setTimeout(()=>el.hidden=true,4500);}
     bind(){
         const click=(id,fn)=>this.el(id).addEventListener("click",fn);
-        click("solo-mode",()=>this.selectSolo());click("online-mode",()=>this.openPanel("friends"));
+        click("solo-mode",()=>this.selectSolo());click("online-mode",()=>this.selectFriends());
+        click("public-city",()=>this.joinPublicCity());click("join-public-city",()=>this.joinPublicCity());
         click("account-button",()=>this.openPanel("account"));click("room-drive",()=>this.closePanel());
         click("close-panel",()=>this.closePanel());click("panel-scrim",()=>this.closePanel());
         click("show-login",()=>this.authTab("login"));click("show-register",()=>this.authTab("register"));
@@ -72,9 +77,14 @@ class MarshrutkaApp {
         else if(!event.shiftKey&&document.activeElement===items.at(-1)){event.preventDefault();items[0].focus();}
     }
     async selectSolo(){
-        this.mode="solo";this.pendingCode=null;
+        this.intent++;this.publicWanted=false;this.mode="solo";this.pendingCode=null;
         this.closePanel();
         await this.leaveRoom();
+    }
+    async selectFriends(){
+        const intent=++this.intent;this.publicWanted=false;this.mode="online";
+        if(this.room?.shared)await this.leaveRoom();
+        if(intent===this.intent)this.openPanel("friends");
     }
     async fullscreen(){
         try{if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen();}
@@ -82,11 +92,19 @@ class MarshrutkaApp {
     }
     refreshChrome(){
         for(const mode of ["solo","online"]){
-            const button=this.el(mode+"-mode"),selected=this.mode===mode;
+            const button=this.el(mode+"-mode"),selected=this.mode===mode&&(mode!=="online"||!this.publicWanted);
             button.classList.toggle("active",selected);button.setAttribute("aria-pressed",String(selected));
         }
         this.el("online-mode").setAttribute("aria-expanded",String(this.panelView==="friends"));
         this.el("account-button").setAttribute("aria-expanded",String(this.panelView==="account"));
+        const shared=this.mode==="online"&&(this.publicWanted||this.room?.shared);
+        this.el("public-city").classList.toggle("active",Boolean(shared));
+        this.el("public-city").setAttribute("aria-pressed",String(Boolean(shared)));
+        this.el("public-city-label").textContent=this.publicJoining?"Подключаемся…":"Общий город";
+        for(const id of ["public-city","join-public-city"]){this.el(id).disabled=this.roomRequest;this.el(id).setAttribute("aria-busy",String(this.publicJoining));}
+        const count=this.room?.shared?this.room.count:this.cityCount;
+        this.el("city-count").hidden=count===null||count===undefined;
+        this.el("city-count").textContent=count??"";
         this.el("latency").textContent=this.socketReady?(this.latency===null?"НА СВЯЗИ":this.latency+" мс · В ГОРОДЕ"):"ЛОКАЛЬНЫЙ РЕЙС";
     }
     authTab(mode){
@@ -105,7 +123,7 @@ class MarshrutkaApp {
             let data;try{data=await response.json();}catch(_){throw Error("Диспетчер не отвечает. Попробуй ещё раз чуть позже.");}
             if(!response.ok){
                 if(response.status===401&&this.token)this.expireSession();
-                throw Error(typeof data.detail==="string"?data.detail:"Проверь позывной, пароль или код комнаты.");
+                const error=Error(typeof data.detail==="string"?data.detail:"Проверь позывной, пароль или код комнаты.");error.status=response.status;throw error;
             }
             return data;
         }catch(error){
@@ -121,6 +139,7 @@ class MarshrutkaApp {
             const data=await this.api("/api/health");
             if(!data.ok||!data.features?.includes("original-city"))throw Error();
             this.healthy=true;this.el("server-led").className="status-led online";this.el("server-status").textContent="Диспетчер на связи";
+            this.loadPublicCity();
         }catch(_){
             this.healthy=false;this.el("server-led").className="status-led offline";this.el("server-status").textContent="Без связи · свой рейс доступен";this.el("retry-server").hidden=false;
         }
@@ -131,18 +150,58 @@ class MarshrutkaApp {
         const initial=(this.user?.username||"Я").slice(0,1).toUpperCase();
         this.el("driver-avatar").textContent=initial;this.el("account-initial").textContent=initial;
     }
+    saveSession(data){
+        this.token=data.token;this.user=data.user;
+        try{sessionStorage.setItem(this.sessionKey,JSON.stringify({token:data.token,expiresAt:data.expires_at}));}catch(_){}
+        this.showUser();
+    }
+    async restoreSession(){
+        if(this.token&&this.user)return true;
+        if(this.restoreTask)return this.restoreTask;
+        let saved;try{saved=JSON.parse(sessionStorage.getItem(this.sessionKey)||"null");}catch(_){}
+        if(!saved?.token||typeof saved.token!=="string")return false;
+        if(saved.expiresAt&&Number(saved.expiresAt)*1000<=Date.now()){try{sessionStorage.removeItem(this.sessionKey);}catch(_){}return false;}
+        this.restoreTask=(async()=>{
+            this.token=saved.token;
+            try{const data=await this.api("/api/auth/me");this.user=data.user;this.showUser();return true;}
+            catch(error){this.token=null;if(error.status===401)return false;throw error;}
+        })();
+        try{return await this.restoreTask;}finally{this.restoreTask=null;}
+    }
+    async loadPublicCity(){
+        try{const data=await this.api("/api/city");this.cityCount=data.room.count;this.refreshChrome();}catch(_){}
+    }
+    async joinPublicCity(){
+        if(this.roomRequest)return;
+        if(this.room?.shared&&this.socketReady){this.publicWanted=true;this.mode="online";this.closePanel();return;}
+        const intent=++this.intent;this.mode="online";this.publicWanted=true;this.pendingCode=null;
+        this.roomRequest=true;this.publicJoining=true;this.refreshChrome();this.banner("Подключаемся к общему городу…");
+        try{
+            if(this.room&&!this.room.shared)await this.leaveRoom(true);
+            let restored=await this.restoreSession();
+            if(intent!==this.intent||this.mode!=="online")return;
+            this.publicWanted=true;
+            if(!restored)this.saveSession(await this.api("/api/auth/guest",{method:"POST",body:{}}));
+            if(intent!==this.intent||this.mode!=="online")return;
+            const data=await this.api("/api/city/join",{method:"POST",body:{}});
+            await this.enterRoom(data.room);if(intent===this.intent&&this.publicWanted)this.closePanel();
+        }catch(error){this.banner("");this.status("room-status",error.message,true);this.toast(error.message);}
+        finally{this.roomRequest=false;this.publicJoining=false;this.refreshChrome();}
+    }
     async authenticate(){
-        const button=this.el("auth-submit");if(button.disabled)return;
+        const button=this.el("auth-submit");if(button.disabled||this.roomRequest)return;
         button.disabled=true;this.status("auth-status","Проверяем удостоверение…");
         try{
             const data=await this.api("/api/auth/"+this.authMode,{method:"POST",body:{username:this.el("username").value.trim(),password:this.el("password").value}});
-            this.token=data.token;this.user=data.user;this.el("password").value="";this.showUser();
+            this.saveSession(data);this.el("password").value="";
             this.status("auth-status","Ты на связи. Можно звать друзей.");this.status("room-status","");
             if(this.pendingCode){const code=this.pendingCode;this.pendingCode=null;await this.joinRoom(code);}
             this.health();
         }catch(e){this.status("auth-status",e.message,true);}finally{button.disabled=false;}
     }
     expireSession(){
+        this.publicWanted=false;
+        try{sessionStorage.removeItem(this.sessionKey);}catch(_){}
         this.closeSocket();this.room=null;this.user=null;this.token=null;citySession.clear();this.showUser();this.renderRoom();
         this.status("auth-status","Сессия закончилась. Войди снова.",true);
     }
@@ -157,6 +216,8 @@ class MarshrutkaApp {
         this.openPanel("friends");this.status("auth-status","Сначала войди или получи позывной.",true);this.el("username").focus();return false;
     }
     async createRoom(){
+        try{await this.restoreSession();}catch(error){this.status("auth-status",error.message,true);return;}
+        this.publicWanted=false;
         if(!this.requireUser()||this.roomRequest)return;
         this.roomRequest=true;const button=this.el("create-room-form").querySelector("button");button.disabled=true;
         this.status("room-status","Создаём комнату…");
@@ -167,7 +228,10 @@ class MarshrutkaApp {
     }
     async joinRoom(raw){
         const code=String(raw).trim().toUpperCase();
+        if(code==="IRKUTK")return this.joinPublicCity();
         if(!/^[A-Z2-9]{6}$/.test(code)){this.status("room-status","Код состоит из шести латинских букв и цифр.",true);return;}
+        try{await this.restoreSession();}catch(error){this.status("auth-status",error.message,true);return;}
+        this.publicWanted=false;
         if(!this.requireUser()){this.pendingCode=code;return;}
         if(this.roomRequest)return;this.roomRequest=true;this.status("room-status","Подключаемся…");
         try{
@@ -182,16 +246,16 @@ class MarshrutkaApp {
     }
     async enterRoom(room){
         // A room request can finish after the player has selected solo mode.
-        if(this.mode!=="online"){
+        if(this.mode!=="online"||(room.shared&&!this.publicWanted)||(!room.shared&&this.publicWanted)){
             await this.api("/api/rooms/"+room.code+"/leave",{method:"POST",body:{}});
             return;
         }
-        this.closeSocket();this.room=room;citySession.clear();citySession.playerId=this.user.id;
-        this.renderRoom();this.connectSocket();
+        this.closeSocket();this.room=room;citySession.clear();citySession.playerId=this.user.id;this.lastRoster="";
+        this.renderRoom();this.renderRoster();this.connectSocket();
     }
     closeSocket(){
         clearTimeout(this.reconnectTimer);this.reconnectTimer=null;this.reconnectDeadline=0;this.reconnectAttempt=0;
-        this.socketReady=false;this.connectionVersion++;
+        this.socketReady=false;this.connectionVersion++;this.spawnRetryAt=0;
         const ws=this.ws;this.ws=null;if(ws&&ws.readyState<2)ws.close(1000,"leave");
         this.banner("");
     }
@@ -207,8 +271,13 @@ class MarshrutkaApp {
             let msg;try{msg=JSON.parse(event.data);}catch(_){ws.close(1008,"bad response");return;}
             if(msg.type==="welcome"){
                 clearTimeout(timer);this.socketReady=true;this.reconnectDeadline=0;this.reconnectAttempt=0;
+                citySession.pendingSpawn=true;this.spawnRetryAt=0;
                 citySession.playerId=msg.player_id;this.banner("");this.status("room-status","На связи. Выезжай, когда будешь готов.");
                 this.send({type:"ping",t:Date.now()});this.sendPose();
+            }else if(msg.type==="spawned"){
+                citySession.pendingSpawn=false;this.spawnRetryAt=0;this.sendPose();
+            }else if(msg.type==="spawn_wait"){
+                citySession.pendingSpawn=true;this.spawnRetryAt=Date.now()+Math.min(15000,Math.max(250,Number(msg.retry_ms)||2000));
             }else if(msg.type==="state"){
                 if(msg.room?.mode!=="city")return;
                 this.room=msg.room;citySession.receive(msg);this.renderRoom();
@@ -224,6 +293,9 @@ class MarshrutkaApp {
             clearTimeout(timer);if(version!==this.connectionVersion)return;
             this.socketReady=false;this.ws=null;
             if(!this.room||!this.token)return;
+            if(this.room.shared&&this.publicWanted&&![4001,4009,1008,1009].includes(event.code)){
+                this.schedulePublicReconnect(version);return;
+            }
             if([4001,4003,4004,4009,1008,1009].includes(event.code)){
                 const message=event.code===4009?"Этот позывной уже подключён в другой вкладке.":"Войди в комнату снова. Твой рейс продолжается.";
                 if(event.code===4001)this.expireSession();else{this.room=null;citySession.clear();this.renderRoom();}
@@ -239,6 +311,21 @@ class MarshrutkaApp {
         });
         ws.addEventListener("error",()=>{});
     }
+    schedulePublicReconnect(version){
+        if(version!==this.connectionVersion||!this.room?.shared||!this.publicWanted||!this.token)return;
+        this.banner("Общий город: восстанавливаем связь…");
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer=setTimeout(async()=>{
+            if(version!==this.connectionVersion||!this.publicWanted||this.mode!=="online")return;
+            try{
+                const data=await this.api("/api/city/join",{method:"POST",body:{}});
+                if(version!==this.connectionVersion||!this.publicWanted||this.mode!=="online")return;
+                this.room=data.room;this.renderRoom();this.connectSocket();
+            }catch(error){
+                if(version===this.connectionVersion&&this.token){this.status("room-status",error.message,true);this.schedulePublicReconnect(version);}
+            }
+        },Math.min(15000,1000*2**Math.min(5,this.reconnectAttempt++)));
+    }
     banner(message){const b=this.el("network-banner");b.textContent=message;b.hidden=!message;}
     send(message){
         if(!this.ws||this.ws.readyState!==WebSocket.OPEN||!this.socketReady||this.ws.bufferedAmount>16384)return false;
@@ -246,62 +333,73 @@ class MarshrutkaApp {
     }
     sendPose(){
         if(!this.socketReady||this.room?.mode!=="city")return;
-        if(citySession.pendingSpawn){if(!this.send({type:"spawn"}))return;citySession.pendingSpawn=false;}
+        if(citySession.pendingSpawn){
+            if(Date.now()>=this.spawnRetryAt&&this.send({type:"spawn"}))this.spawnRetryAt=Date.now()+2000;
+            return;
+        }
         this.send({type:"pose",seq:++this.seq,...citySession.pose(game)});
     }
     broadcastHorn(){
         if(Date.now()-this.lastHorn<2100)return;
         if(this.send({type:"horn"}))this.lastHorn=Date.now();
     }
-    async leaveRoom(){
+    async leaveRoom(keepPublicIntent=false){
+        if(!keepPublicIntent)this.publicWanted=false;
         if(!this.room)return;
         const code=this.room.code;this.closeSocket();this.room=null;citySession.clear();this.renderRoom();
         try{await this.api("/api/rooms/"+code+"/leave",{method:"POST",body:{}});this.status("room-status","Ты покинул комнату. Свой рейс можно продолжить.");}
         catch(e){this.status("room-status",e.message,true);}
     }
     async copyInvite(){
-        if(!this.room)return;
+        if(!this.room||this.room.shared)return;
         const url=new URL(location.href);url.search="";url.hash="";url.searchParams.set("room",this.room.code);
         try{await navigator.clipboard.writeText(url.href);this.toast("Приглашение скопировано. Отправь его другу.");}
         catch(_){this.toast("Код для друзей: "+this.room.code);}
     }
     renderRoom(){
         this.el("room-browser").hidden=!!this.room;this.el("room-active").hidden=!this.room;
-        this.el("online-count").hidden=!this.room;this.el("crew-strip").hidden=!this.room;
+        this.el("online-count").hidden=!this.room||this.room.shared;this.el("crew-strip").hidden=!this.room;
         if(this.room){
-            this.el("active-room-code").textContent=this.room.code;this.el("active-room-name").textContent=this.room.name;
+            this.el("active-room-code").textContent=this.room.shared?"ИРКУТСК":this.room.code;
+            this.el("room-ticket-label").textContent=this.room.shared?"ОБЩИЙ ГОРОД":"КОД ДЛЯ ДРУЗЕЙ";
+            this.el("active-room-name").textContent=this.room.shared?"Общий город • "+this.room.count+" водителей":this.room.name;
+            this.el("copy-room").hidden=Boolean(this.room.shared);
+            this.el("room-leave").textContent=this.room.shared?"Покинуть общий город":"Покинуть комнату";
+            this.el("players-list").classList.toggle("shared-roster",Boolean(this.room.shared));
             this.el("online-count").textContent=this.room.count;
         }
         if(!this.room){this.lastRoster="";this.el("players-list").replaceChildren();this.el("crew-strip").replaceChildren();}
     }
     renderRoster(){
         if(!this.room)return;
-        const players=this.room.players||[];
+        const players=[...(this.room.players||[])].sort((a,b)=>Number(b.id===this.user?.id)-Number(a.id===this.user?.id));
         const labels={intro:"В гараже",menu:"В гараже",dialog:"Инструктаж",play:"На линии",turning:"Поворот",pause:"Пауза",caught:"У ДПС",station:"В отделе",boom:"Авария",offer:"Ремонт",over:"Рейс окончен"};
         const rows=players.map(p=>({p,label:!p.connected?"Нет связи":p.id===this.user?.id?"Ты":labels[p.state]||"На связи"}));
         const key=JSON.stringify(rows.map(({p,label})=>[p.id,p.username,p.number,label]));
         if(key===this.lastRoster)return;this.lastRoster=key;
-        const dot=p=>{const d=document.createElement("span");d.className="player-dot player-color-"+p.number;d.textContent=p.number;return d;};
+        const dot=p=>{const d=document.createElement("span");d.className="player-dot player-color-"+(((Math.max(1,Number(p.number)||1)-1)%8)+1);d.textContent=p.number;return d;};
         this.el("players-list").replaceChildren(...rows.map(({p,label})=>{
             const row=document.createElement("div");row.className="player-row"+(p.connected?"":" disconnected");
             const name=document.createElement("span");name.className="player-name";name.textContent=p.username;
             const state=document.createElement("small");state.textContent=label;row.append(dot(p),name,state);return row;
         }));
-        this.el("crew-strip").replaceChildren(...rows.map(({p})=>{
+        const chips=rows.slice(0,8).map(({p})=>{
             const chip=document.createElement("div");chip.className="crew-chip";
             const name=document.createElement("span");name.className="crew-name";name.textContent=p.username+(p.id===this.user?.id?" · ты":"");chip.append(dot(p),name);return chip;
-        }));
+        });
+        if(rows.length>8){const more=document.createElement("div");more.className="crew-chip crew-more";more.textContent="Ещё "+(rows.length-8)+" водителей";chips.push(more);}
+        this.el("crew-strip").replaceChildren(...chips);
     }
     async loadRooms(){
         if(this.room)return;const list=this.el("rooms-list");
         try{
-            const data=await this.api("/api/rooms");const rooms=data.rooms.filter(r=>r.mode==="city");
+            const data=await this.api("/api/rooms");const rooms=data.rooms.filter(r=>r.mode==="city"&&!r.shared);
             if(!rooms.length){const p=document.createElement("p");p.className="muted small";p.textContent="Пока никого. Создай комнату и позови своих.";list.replaceChildren(p);return;}
             list.replaceChildren(...rooms.map(r=>{
-                const b=document.createElement("button");b.className="room-entry";b.type="button";b.disabled=r.count>=r.max_players;
+                const b=document.createElement("button");b.className="room-entry";b.type="button";b.disabled=Number.isFinite(r.max_players)&&r.max_players>0&&r.count>=r.max_players;
                 const name=document.createElement("span");name.textContent=r.name;
                 const code=document.createElement("small");code.textContent=r.code;name.append(code);
-                const count=document.createElement("span");count.textContent=r.count+" / "+r.max_players;
+                const count=document.createElement("span");count.textContent=r.max_players==null?r.count+" водителей":r.count+" / "+r.max_players;
                 b.append(name,count);b.addEventListener("click",()=>this.joinRoom(r.code));return b;
             }));
         }catch(_){const p=document.createElement("p");p.className="muted small";p.textContent="Комнаты появятся, когда восстановится связь.";list.replaceChildren(p);}

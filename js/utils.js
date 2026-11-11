@@ -77,7 +77,17 @@ class CityGraph {
         this.data = data;
         this.nodes = new Map(data.nodes.map((node, index) => [node.id, { ...node, index }]));
         this.edges = new Map();
+        this.spatialCells = new Map();
+        this.spatialWideEdges = [];
+        this.spatialCellSize = 250 / (data.metersPerUnit || METERS_PER_PX);
         this.adjacent = new Map(data.nodes.map((node) => [node.id, []]));
+        this.turnRuleIndex = new Map();
+        for (const rule of data.restrictions || []) {
+            if (!this.turnRuleIndex.has(rule.from)) this.turnRuleIndex.set(rule.from, new Map());
+            const byNode = this.turnRuleIndex.get(rule.from);
+            if (!byNode.has(rule.via)) byNode.set(rule.via, []);
+            byNode.get(rule.via).push(rule);
+        }
         data.edges.forEach((source, index) => {
             const from = this.nodes.get(source.from), to = this.nodes.get(source.to);
             if (!from || !to) throw new Error(`Неизвестный узел улицы ${source.id}`);
@@ -98,14 +108,34 @@ class CityGraph {
             }
             const length = distances.at(-1);
             if (length < 0.001) throw new Error(`Нулевая длина улицы ${source.id}`);
-            const edge = { lanes: 4, ...source, index, length, geometry, distances,
-                bounds: { minX: Math.min(...geometry.map((point) => point[0])), maxX: Math.max(...geometry.map((point) => point[0])),
-                    minY: Math.min(...geometry.map((point) => point[1])), maxY: Math.max(...geometry.map((point) => point[1])) },
+            const bounds = geometry.reduce((box, point) => ({ minX: Math.min(box.minX, point[0]), maxX: Math.max(box.maxX, point[0]),
+                minY: Math.min(box.minY, point[1]), maxY: Math.max(box.maxY, point[1]) }),
+                { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+            const edge = { lanes: 4, ...source, index, length, geometry, distances, bounds,
                 vector: [(to.x - from.x) / length, (to.y - from.y) / length] };
             this.edges.set(edge.id, edge);
             this.adjacent.get(edge.from).push(edge);
             this.adjacent.get(edge.to).push(edge);
+            const box = edge.bounds, size = this.spatialCellSize;
+            const x0 = Math.floor(box.minX / size), x1 = Math.floor(box.maxX / size);
+            const y0 = Math.floor(box.minY / size), y1 = Math.floor(box.maxY / size);
+            if ((x1 - x0 + 1) * (y1 - y0 + 1) > 1024) this.spatialWideEdges.push(edge);
+            else for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
+                const key = `${x}:${y}`;
+                if (!this.spatialCells.has(key)) this.spatialCells.set(key, []);
+                this.spatialCells.get(key).push(edge);
+            }
         });
+    }
+
+    nearbyEdges(x, y, radius) {
+        const size = this.spatialCellSize, result = new Set(this.spatialWideEdges);
+        for (let cx = Math.floor((x - radius) / size); cx <= Math.floor((x + radius) / size); cx++) {
+            for (let cy = Math.floor((y - radius) / size); cy <= Math.floor((y + radius) / size); cy++) {
+                for (const edge of this.spatialCells.get(`${cx}:${cy}`) || []) result.add(edge);
+            }
+        }
+        return result;
     }
 
     endpoint(edge, reverse) { return reverse ? edge.from : edge.to; }
@@ -122,12 +152,29 @@ class CityGraph {
         return lo;
     }
     direction(edge, reverse, offset = reverse ? edge.length : 0) {
-        const index = this.segment(edge, offset), a = edge.geometry[index], b = edge.geometry[index + 1];
+        const index = this.segment(edge, reverse ? Math.max(0, offset - 1e-7) : offset);
+        const a = edge.geometry[index], b = edge.geometry[index + 1];
         const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
         const sign = reverse ? -1 : 1;
         return length ? [(b[0] - a[0]) / length * sign, (b[1] - a[1]) / length * sign] : [0, -sign];
     }
-    fromNode(edge, node) { return { edge, reverse: edge.to === node }; }
+    fromNode(edge, node) {
+        return { edge, reverse: edge.from === edge.to ? !this.canTraverse(edge, false) : edge.to === node };
+    }
+    outgoingFrom(node) {
+        const choices = [], seen = new Set();
+        for (const edge of this.adjacent.get(node) || []) {
+            const directions = edge.from === edge.to ? [false, true] : [edge.to === node];
+            for (const reverse of directions) {
+                const key = `${edge.id}:${reverse}`;
+                if (!seen.has(key) && this.canTraverse(edge, reverse)) {
+                    seen.add(key);
+                    choices.push({ edge, reverse });
+                }
+            }
+        }
+        return choices;
+    }
     canTraverse(edge, reverse) {
         const oneway = edge.oneway;
         if (edge.busOneway !== undefined) return edge.busOneway === 0 || (edge.busOneway === -1) === reverse;
@@ -138,7 +185,7 @@ class CityGraph {
     canTurn(from, via, to, reverse) {
         if ((from.from !== via && from.to !== via) || this.origin(to, reverse) !== via) return false;
         if (!this.canTraverse(to, reverse)) return false;
-        const rules = (this.data.restrictions || []).filter((rule) => rule.from === from.id && rule.via === via);
+        const rules = this.turnRuleIndex.get(from.id)?.get(via) || [];
         if (rules.some((rule) => rule.only) && !rules.some((rule) => rule.only && rule.to === to.id)) return false;
         return !rules.some((rule) => !rule.only && rule.to === to.id);
     }
@@ -219,6 +266,12 @@ class CityGraph {
                 if (!this.canTurn(previous.edge, via, leg.edge, leg.reverse)) {
                     throw new Error(`Запрещённый поворот маршрута ${number}: ${previous.edge.id} → ${leg.edge.id}`);
                 }
+            }
+        }
+        if (this.data.metadata?.source === "OpenStreetMap") {
+            const first = legs[0], last = legs.at(-1), via = this.endpoint(last.edge, last.reverse);
+            if (via !== this.origin(first.edge, first.reverse) || !this.canTurn(last.edge, via, first.edge, first.reverse)) {
+                throw new Error(`Рейс маршрута ${number} не замыкается по разрешённым дорогам`);
             }
         }
         return { legs, stopCount: sequence };
@@ -312,7 +365,7 @@ function loadSave() {
     try {
         Object.assign(data, JSON.parse(localStorage.getItem(SAVE_KEY)) || {});
     } catch (e) { /* нет сохранения — начинаем с нуля */ }
-    const replacedRoutes = { "83": "80", "10": "80", "112": "33" };
+    const replacedRoutes = { "10": "80", "112": "33" };
     const migrateRoute = (number) => replacedRoutes[String(number)] || String(number);
     data.routes = [...new Set(["480", ...(Array.isArray(data.routes) ? data.routes : []).map(migrateRoute)])]
         .filter((number) => ROUTES.some((route) => route.num === number));

@@ -20,7 +20,8 @@ class Settings:
     register_limit: int = 5
     http_limit: int = 120
     max_rooms: int = 64
-    max_connections: int = 128
+    # Zero leaves the common city's capacity to the host's resources.
+    max_connections: int = 0
     body_limit: int = 8192
     ws_limit: int = 2048
     web_path: str = field(default_factory=lambda: str(Path(__file__).resolve().parents[2] / "web"))
@@ -42,6 +43,8 @@ class Settings:
             raise ValueError("Trusted hosts must be exact host names")
         if not 1 <= self.round_seconds <= 3600 or self.session_seconds < 1:
             raise ValueError("Invalid time settings")
+        if self.max_connections < 0:
+            raise ValueError("M480_MAX_CONNECTIONS must be zero or positive")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -52,4 +55,5 @@ class Settings:
             allowed_origins=csv("M480_ORIGINS", cls.allowed_origins),
             allowed_hosts=csv("M480_HOSTS", cls.allowed_hosts),
             environment=os.getenv("M480_ENV", "development"),
+            max_connections=int(os.getenv("M480_MAX_CONNECTIONS", "0")),
         )

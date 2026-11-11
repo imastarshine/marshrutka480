@@ -25,7 +25,7 @@ const METERS_PER_PX = KMH / 3.6 / 60;   // пробег согласован с�
 
 const COMPLAINT_FINE = 20, POLICE_FINE = 500, WRONG_STOP_FINE = 150, PED_FINE = 300;
 const MAX_COMPLAINTS = 10, SPEED_LIMIT = 70;
-const SHIFT_START = 7 * 60, SHIFT_END = 19 * 60, FRAMES_PER_MIN = 30;   // смена 7:00–19:00
+const SHIFT_START = 7 * 60, SHIFT_END = 19 * 60, FRAMES_PER_MIN = 360;  // смена 7:00–19:00: 72 реальных минуты для настоящих расстояний
 const REPAIR_COST = 300;
 // репутация водителя 0..100 копится между рейсами: звания и что она даёт
 const REP_TITLES = [[80, "Легенда района"], [60, "Уважаемый"], [40, "Обычный водитель"], [20, "Лихач"], [0, "Позор маршрута"]];
@@ -82,6 +82,12 @@ const ROUTES = [
         districts: ["center", "khrush", "river", "market"], desc: "Областная больница · кольцевой" },
     { num: "33", price: 4000, fare: 85, traffic: 0.7, wait: [1, 6], stopGap: [2200, 3400], post: 0.7,
         districts: ["private", "industrial", "river", "center"], desc: "Батарейная — Центральный рынок" },
+    { num: "83", price: 3000, fare: 70, traffic: 1.1, wait: [2, 8], stopGap: [1600, 2600], post: 0.8,
+        districts: ["khrush", "river", "center", "market"], desc: "Радужный — Центральный рынок" },
+    { num: "90", price: 4500, fare: 80, traffic: 1.2, wait: [2, 9], stopGap: [1800, 2800], post: 0.8,
+        districts: ["center", "river", "khrush", "park"], desc: "Аэропорт · кольцевой через ГЭС" },
+    { num: "Т4", price: 3500, fare: 65, traffic: 1, wait: [2, 8], stopGap: [1600, 2600], post: 0.7,
+        districts: ["center", "old", "khrush"], desc: "Сквер Кирова — Аэропорт" },
 ];
 
 // районы города: из каких кусков застройки состоят
@@ -101,7 +107,7 @@ const DISTRICTS = {
 // Резервные подписи для сюжетных объектов; маршрутные остановки берутся из графа.
 const STOP_NAMES = ["Центральный рынок", "Театр кукол", "Технический университет",
     "Жуковского", "Свердловский рынок", "Аэропорт", "Курорт Ангара", "Луговое"];
-const OTHER_ROUTES = ["3", "7к", "18", "40", "67", "80", "90", "480", "33"];
+const OTHER_ROUTES = ["3", "7к", "18", "40", "67", "80", "83", "90", "480", "33", "Т4"];
 
 const CAR_COLORS = [
     [200, 40, 40], [40, 90, 200], [30, 140, 60], [120, 120, 130],
