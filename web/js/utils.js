@@ -65,41 +65,81 @@ function hash(a, b, c) {
     return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-// координата k-й вертикальной (axis "x") или горизонтальной ("y") улицы: кварталы разной длины
-function gridPos(axis, k) {
-    return k * BLOCK + (hash(axis === "x" ? 1 : 2, k, 7) - 0.5) * BLOCK * 0.62;
-}
-
-function streetLanes(vertical, k) {
-    if (vertical && k === 0) return 4;            // стартовая улица
-    const r = hash(vertical ? 3 : 4, k, 11);
-    return r < 0.3 ? 2 : r < 0.8 ? 4 : 6;
-}
-
-// есть ли кусок улицы между поперечными seg и seg+1. Проспекты (4–6 полос) непрерывны,
-// а узкая улица может обрываться между двумя проспектами — получаются Т-перекрёстки и тупики
-function segExists(vertical, k, seg) {
-    if (streetLanes(vertical, k) >= 4) return true;
-    if (streetLanes(!vertical, seg) < 4 || streetLanes(!vertical, seg + 1) < 4) return true;
-    return hash(vertical ? 5 : 6, k, seg) < 0.5;
-}
-
-// узел (i — вертикальная улица, j — горизонтальная): есть ли улица в сторону [x, y]
-function armExists(i, j, [x, y]) {
-    if (y < 0) return segExists(true, i, j - 1);
-    if (y > 0) return segExists(true, i, j);
-    if (x > 0) return segExists(false, j, i);
-    return segExists(false, j, i - 1);
-}
-
 function approach(value, target, step) {
     if (Math.abs(target - value) <= step) return target;
     return value + (target > value ? step : -step);
 }
 
-function streetName(vertical, k) {
-    const names = vertical ? STREETS_V : STREETS_H;
-    return names[mod(k, names.length)];
+// Конечный граф Иркутска. Координаты схематические, связи — конкретные улицы:
+// название, ширина, остановки и миникарта используют одни и те же рёбра.
+class CityGraph {
+    constructor(data) {
+        this.data = data;
+        this.nodes = new Map(data.nodes.map((node, index) => [node.id, { ...node, index }]));
+        this.edges = new Map();
+        this.adjacent = new Map(data.nodes.map((node) => [node.id, []]));
+        data.edges.forEach((source, index) => {
+            const from = this.nodes.get(source.from), to = this.nodes.get(source.to);
+            if (!from || !to) throw new Error(`Неизвестный узел улицы ${source.id}`);
+            const length = Math.hypot(to.x - from.x, to.y - from.y);
+            if (length < 1) throw new Error(`Нулевая длина улицы ${source.id}`);
+            const edge = { lanes: 4, ...source, index, length,
+                vector: [(to.x - from.x) / length, (to.y - from.y) / length] };
+            this.edges.set(edge.id, edge);
+            this.adjacent.get(edge.from).push(edge);
+            this.adjacent.get(edge.to).push(edge);
+        });
+    }
+
+    endpoint(edge, reverse) { return reverse ? edge.from : edge.to; }
+    origin(edge, reverse) { return reverse ? edge.to : edge.from; }
+    direction(edge, reverse) { return edge.vector.map((v) => reverse ? -v : v); }
+    fromNode(edge, node) { return { edge, reverse: edge.to === node }; }
+    position(edge, offset) {
+        const from = this.nodes.get(edge.from);
+        return [from.x + edge.vector[0] * offset, from.y + edge.vector[1] * offset];
+    }
+
+    itinerary(number) {
+        const route = this.data.routes[number];
+        if (!route?.path?.length) throw new Error(`Нет схемы маршрута ${number}`);
+        let previous = null;
+        const outward = route.path.map((item) => {
+            const spec = typeof item === "string" ? { edge: item } : item;
+            const edge = this.edges.get(spec.edge);
+            if (!edge) throw new Error(`Неизвестный участок маршрута ${number}: ${spec.edge}`);
+            const reverse = spec.reverse ?? (previous !== null && edge.to === previous);
+            if (previous !== null && this.origin(edge, reverse) !== previous) {
+                throw new Error(`Разрыв маршрута ${number}: ${edge.id}`);
+            }
+            previous = this.endpoint(edge, reverse);
+            return { edge, reverse };
+        });
+        const returning = route.loop ? [] : route.returnPath?.length ? route.returnPath.map((item) => {
+            const spec = typeof item === "string" ? { edge: item } : item;
+            const edge = this.edges.get(spec.edge);
+            if (!edge) throw new Error(`Неизвестный обратный участок маршрута ${number}: ${spec.edge}`);
+            const reverse = spec.reverse ?? edge.to === previous;
+            if (this.origin(edge, reverse) !== previous) throw new Error(`Разрыв обратного маршрута ${number}`);
+            previous = this.endpoint(edge, reverse);
+            return { edge, reverse };
+        }) : [...outward].reverse().map((leg) => ({ edge: leg.edge, reverse: !leg.reverse }));
+        let sequence = 0;
+        const used = new Set();
+        const attach = (legs, stops, mirrored = false, stage = "out") => legs.map((leg) => {
+            const list = stops.filter((stop, index) => !used.has(`${stage}:${index}`) &&
+                stop.edge === leg.edge.id && (mirrored ? !(stop.reverse ?? false) : (stop.reverse ?? false)) === leg.reverse)
+                .sort((a, b) => leg.reverse ? b.at - a.at : a.at - b.at)
+                .map((stop) => {
+                    used.add(`${stage}:${stops.indexOf(stop)}`);
+                    return { ...stop, at: clamp(stop.at, 0.08, 0.92), sequence: sequence++ };
+                });
+            return { ...leg, stops: list };
+        });
+        const legs = [...attach(outward, route.stops || []),
+            ...attach(returning, route.returnStops || route.stops || [], !route.returnStops, "return")];
+        return { legs, stopCount: sequence };
+    }
 }
 
 function rect(x, y, w, h) {
@@ -189,6 +229,12 @@ function loadSave() {
     try {
         Object.assign(data, JSON.parse(localStorage.getItem(SAVE_KEY)) || {});
     } catch (e) { /* нет сохранения — начинаем с нуля */ }
+    const replacedRoutes = { "83": "80", "10": "80", "112": "33" };
+    const migrateRoute = (number) => replacedRoutes[String(number)] || String(number);
+    data.routes = [...new Set(["480", ...(Array.isArray(data.routes) ? data.routes : []).map(migrateRoute)])]
+        .filter((number) => ROUTES.some((route) => route.num === number));
+    data.route = migrateRoute(data.route);
+    if (!data.routes.includes(data.route)) data.route = "480";
     return data;
 }
 

@@ -36,7 +36,7 @@ const MAX_STARS = 5, STAR_DECAY = 60 * 12, POLICE_RETURN = 60 * 14;
 const BRIBE_RATE = 0.6, HONEST_COP = 0.2, STATION_MINUTES = 90;
 const ESCORT_FRAMES = 160, STATION_CARD = 220;   // конвой за машиной ДПС, затем сцена в отделе
 
-const BLOCK = 3000;            // средняя длина квартала; сами улицы стоят неровно (см. gridPos)
+const BLOCK = 3000;            // масштаб миникарты в игровых пикселях
 const GREEN_T = 300, YELLOW_T = 70, RED_T = 280;
 const CYCLE = GREEN_T + YELLOW_T + RED_T;
 const COMBO_TIME = 240;
@@ -73,18 +73,15 @@ const BUS_MODELS = [
         color: [50, 150, 90], stripe: [235, 235, 235], desc: "45 мест, 3 двери — касса не успевает" },
 ];
 
-// маршруты: тариф, какие районы проезжает, плотность движения, сколько людей ждёт
+// Реальные линии Иркутска; тарифы и цены открытия — игровая экономика.
+// География, связанные улицы и остановки каждого направления — в city.js.
 const ROUTES = [
     { num: "480", price: 0, fare: 60, traffic: 1, wait: [1, 7], stopGap: [1600, 2600], post: 1,
-        districts: ["center", "khrush", "park", "market"], desc: "Центр, спальники и рынок" },
-    { num: "10", price: 1500, fare: 50, traffic: 1.45, wait: [3, 11], stopGap: [1200, 2000], post: 1.2,
-        districts: ["center", "old", "market", "center"], desc: "«Десятка»: толпы и пробки в центре" },
-    { num: "83", price: 2500, fare: 70, traffic: 0.85, wait: [1, 6], stopGap: [1700, 2800], post: 0.8,
-        districts: ["industrial", "garages", "khrush", "river"], desc: "Промзона, гаражи, мосты" },
-    { num: "33", price: 4000, fare: 85, traffic: 0.6, wait: [1, 5], stopGap: [2200, 3400], post: 0.7,
-        districts: ["private", "outskirts", "river", "park"], desc: "Частный сектор и пригород" },
-    { num: "112", price: 6500, fare: 100, traffic: 1.25, wait: [2, 9], stopGap: [1800, 2900], post: 1.4,
-        districts: ["center", "khrush", "industrial", "river", "private", "old", "park"], desc: "Экспресс через весь город" },
+        districts: ["center", "khrush", "park", "market"], desc: "Аэропорт — Луговое" },
+    { num: "80", price: 2500, fare: 70, traffic: 1.2, wait: [2, 9], stopGap: [1700, 2800], post: 0.8,
+        districts: ["center", "khrush", "river", "market"], desc: "Областная больница · кольцевой" },
+    { num: "33", price: 4000, fare: 85, traffic: 0.7, wait: [1, 6], stopGap: [2200, 3400], post: 0.7,
+        districts: ["private", "industrial", "river", "center"], desc: "Батарейная — Центральный рынок" },
 ];
 
 // районы города: из каких кусков застройки состоят
@@ -101,16 +98,10 @@ const DISTRICTS = {
     outskirts: { name: "Окраина", kinds: ["field", "forest", "hill", "field", "house"], ground: [110, 145, 70], bridge: 0.35 },
 };
 
-const STOP_NAMES = [
-    "Рынок", "Школа №5", "Больница", "Площадь", "Вокзал", "Парк",
-    "Завод", "Библиотека", "Стадион", "ТЦ «Радуга»", "Почта",
-    "Улица Садовая", "Микрорайон", "Мост", "Конечная",
-];
-const OTHER_ROUTES = ["12", "37", "105", "7", "64", "Тр.3", "480", "10", "83", "33", "112"];
-const STREETS_V = ["ул. Ленина", "ул. Гагарина", "пр. Мира", "ул. Пушкина",
-    "ул. Садовая", "ул. Советская", "ул. Лесная", "ул. Школьная"];
-const STREETS_H = ["ул. Победы", "ул. Кирова", "ул. Набережная", "пр. Строителей",
-    "ул. Чехова", "ул. Заводская", "ул. Молодёжная", "ул. Центральная"];
+// Резервные подписи для сюжетных объектов; маршрутные остановки берутся из графа.
+const STOP_NAMES = ["Центральный рынок", "Театр кукол", "Технический университет",
+    "Жуковского", "Свердловский рынок", "Аэропорт", "Курорт Ангара", "Луговое"];
+const OTHER_ROUTES = ["3", "7к", "18", "40", "67", "80", "90", "480", "33"];
 
 const CAR_COLORS = [
     [200, 40, 40], [40, 90, 200], [30, 140, 60], [120, 120, 130],

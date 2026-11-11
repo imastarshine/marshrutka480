@@ -113,10 +113,10 @@ with tempfile.TemporaryDirectory(prefix="m480-city-browser-") as temp:
             result=first.evaluate("""async () => {
                 window.originalSend=app.send.bind(app);
                 app.send=m=>{if(m.type==='pose'){setTimeout(()=>originalSend(m),350);return true;}return originalSend(m);};
-                canvas.focus();const before=game.wy,start=performance.now();
+                canvas.focus();const before=[game.wx,game.wy],start=performance.now();
                 window.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyW',bubbles:true}));
                 await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
-                const result={elapsed:performance.now()-start,speed:game.bus.speed,moved:game.wy!==before};
+                const result={elapsed:performance.now()-start,speed:game.bus.speed,moved:Math.hypot(game.wx-before[0],game.wy-before[1])>0};
                 window.dispatchEvent(new KeyboardEvent('keyup',{code:'KeyW',bubbles:true}));
                 return result;
             }""")
@@ -134,7 +134,7 @@ with tempfile.TemporaryDirectory(prefix="m480-city-browser-") as temp:
             first.locator("canvas").focus()
             first.keyboard.down("ArrowUp");first.wait_for_timeout(1400);first.keyboard.up("ArrowUp")
             first.keyboard.down("ArrowDown");first.wait_for_timeout(700);first.keyboard.up("ArrowDown")
-            wait(second,"citySession.players().some(p=>p.username==='Driver_City_A' && Math.abs(p.wy-game.wy)>20)")
+            wait(second,"citySession.players().some(p=>p.username==='Driver_City_A' && Math.hypot(p.wx-game.wx,p.wy-game.wy)>20)")
             wait(second,"citySession.drawnPlayers === 1")
             assert first.evaluate("citySession.mapMarkersCount === 1")
             second.screenshot(path=str(OUT/"city-desktop.png"))
@@ -142,15 +142,34 @@ with tempfile.TemporaryDirectory(prefix="m480-city-browser-") as temp:
 
             # Exercise the actual turning animation and world-space packet,
             # without spending a full shift driving to a particular junction.
-            first.evaluate("""() => {
-                game.bus.invuln=600;game.cars=[];game.bus.speed=6;
-                const k=game.nearestCross(game.along).k;
-                const inter=new Intersection(game.bus.centerY-100,k,streetName(!game.vertical,k),4,{left:true,right:true,straight:true});
-                game.startTurn(1,inter);
+            turn=first.evaluate("""() => {
+                game.bus.invuln=600;game.cars=[];game.inters=[];game.bus.speed=6;
+                let chosen=null;
+                for(let index=0;index<game.cityItinerary.legs.length;index++){
+                    const leg=game.cityItinerary.legs[index];
+                    game.cityLegIndex=index;game.cityEdge=leg.edge;game.cityReverse=leg.reverse;
+                    game.dir=game.cityGraph.direction(leg.edge,leg.reverse);
+                    const options=game.cityOptions(),next=game.cityItinerary.legs[(index+1)%game.cityItinerary.legs.length];
+                    for(const [side,sign] of [['right',1],['left',-1]]){
+                        const option=options[side];
+                        if(option?.edge.id===next.edge.id&&option.reverse===next.reverse){chosen={leg,sign};break;}
+                    }
+                    if(chosen)break;
+                }
+                if(!chosen)throw new Error('Real route has no turn to exercise');
+                game.cityOffset=game.cityReverse?80:game.cityEdge.length-80;
+                [game.wx,game.wy]=game.cityGraph.position(game.cityEdge,game.cityOffset);
+                game.streetK=game.cityEdge.index;setRoad(game.cityEdge.lanes);
+                const k=game.nextCross().k,node=game.cityGraph.nodes.get(k);
+                const inter=new Intersection(game.bus.centerY-100,k,'Перекрёсток маршрута',4,game.arms(k));
+                citySession.pendingSpawn=true;
+                if(!game.startTurn(chosen.sign,inter))throw new Error('Connected nearby turn was rejected');
+                if(Math.hypot(game.wx-node.x,game.wy-node.y)>.01)throw new Error('Turn left its shared intersection');
+                return {angle:Math.atan2(game.dir[0],-game.dir[1]),street:game.currentStreet()};
             }""")
             wait(second,"citySession.players().some(p=>p.username==='Driver_City_A' && p.state==='turning')")
             wait(first,"game.state === 'play'")
-            wait(second,"citySession.players().some(p=>p.username==='Driver_City_A' && Math.abs(p.angle)>1.5)")
+            wait(second,f"citySession.players().some(p=>p.username==='Driver_City_A' && Math.cos(p.angle-({turn['angle']}))>.99 && p.street==={json.dumps(turn['street'])})")
             assert first.evaluate("app.socketReady")
             mark("original intersection turn, rotation, world coordinates and minimap survive a change of street")
 

@@ -36,11 +36,11 @@ class BusStop {
     static HEIGHT = 300;
     static TAPER = 60;
 
-    constructor(id, y, route, rep = 50) {
+    constructor(id, y, route, rep = 50, definition = null) {
         this.id = id;                         // null — чужая остановка
         this.ours = id !== null;
-        this.route = this.ours ? route.num : choice(OTHER_ROUTES.filter((n) => n !== route.num));
-        this.name = this.ours ? STOP_NAMES[id % STOP_NAMES.length] : choice(STOP_NAMES);
+        this.route = definition?.route || (this.ours ? route.num : OTHER_ROUTES.find((number) => number !== route.num));
+        this.name = definition?.name || STOP_NAMES[(id || 0) % STOP_NAMES.length];
         this.y = y;
         this.waiting = Math.max(0, randint(...route.wait) + (rep >= 75 ? 1 : rep < 25 ? -1 : 0));
         this.edge = ROAD_RIGHT;               // правый край открытой дороги у остановки

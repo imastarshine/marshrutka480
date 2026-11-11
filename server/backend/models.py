@@ -75,7 +75,7 @@ class CityPoseMessage(StrictModel):
     door: float = Field(ge=0, le=1, allow_inf_nan=False)
     braking: bool
     bus: Literal["gazel", "transit", "paz", "sprinter", "liaz"]
-    route: Literal["480", "10", "83", "33", "112"]
+    route: Literal["480", "10", "80", "83", "33", "112"]
     state: Literal["intro", "menu", "dialog", "play", "turning", "pause", "boom", "offer", "caught", "station", "over"]
     street: str = Field(max_length=60)
 

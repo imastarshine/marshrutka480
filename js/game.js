@@ -24,10 +24,24 @@ class GameCore {
     }
 
     reset() {
+        window.citySession?.onReset();
         const up = this.save.upgrades;
-        setRoad(streetLanes(true, 0));
         this.model = BUS_MODELS.find((m) => m.key === this.save.bus) || BUS_MODELS[0];
         this.route = ROUTES.find((r) => r.num === this.save.route) || ROUTES[0];
+        this.cityGraph = new CityGraph(IRKUTSK_CITY);
+        this.cityItinerary = this.cityGraph.itinerary(this.route.num);
+        this.cityLegIndex = 0;
+        this.cityLap = 0;
+        this.cityOffRoute = false;
+        this.spawnedCityStops = new Set();
+        const firstLeg = this.cityItinerary.legs[0];
+        this.cityEdge = firstLeg.edge;
+        this.cityReverse = firstLeg.reverse;
+        this.cityOffset = firstLeg.reverse ? firstLeg.edge.length - 40 : 40;
+        this.dir = this.cityGraph.direction(this.cityEdge, this.cityReverse);
+        [this.wx, this.wy] = this.cityGraph.position(this.cityEdge, this.cityOffset);
+        this.streetK = this.cityEdge.index;
+        setRoad(this.cityEdge.lanes);
         this.bus = new Bus(up, this.model, this.route.num);
         this.capacity = this.model.cap + 3 * (up.seats || 0);
         // репутация: уважаемому водителю платят больше (±15%), к нему приходят люди, ДПС к нему мягче
@@ -39,8 +53,7 @@ class GameCore {
         // сколько человек обслуживается за раз: двери + касса
         this.perTick = this.model.doors + (up.cashbox || 0);
         this.serviceDelay = Math.max(10, 22 - 3 * (up.cashbox || 0));
-        this.district = choice(this.route.districts);
-        this.districtLeft = rand(3500, 5500);
+        this.district = this.cityEdge.district || this.route.districts[0];
         this.scenery = new Scenery(this);
         this.crosswalks = [];
         this.bridges = [];
@@ -92,10 +105,6 @@ class GameCore {
         this.boomTimer = 0;
         this.banner = null;
         // карта города: позиция маршрутки и направление (север = вверх)
-        this.streetK = 0;                       // номер улицы, по которой едем
-        this.wx = gridPos("x", 0);
-        this.wy = gridPos("y", 0) + BLOCK * 0.4;
-        this.dir = [0, -1];
         this.trail = [[this.wx, this.wy]];
         this.wrongWay = 0;
         this.clock = SHIFT_START * FRAMES_PER_MIN;
@@ -141,15 +150,12 @@ class GameCore {
 
     // поперечные улицы: k и их координата вдоль нашего движения
     crossAlong(k) {
-        const sgn = this.vertical ? this.dir[1] : this.dir[0];
-        return gridPos(this.vertical ? "y" : "x", k) * sgn;
+        const node = this.cityGraph.nodes.get(k);
+        return node.x * this.dir[0] + node.y * this.dir[1];
     }
 
     crossNear(along) {
-        const sgn = this.vertical ? this.dir[1] : this.dir[0];
-        const k0 = Math.round((along * sgn) / BLOCK), out = [];
-        for (let k = k0 - 2; k <= k0 + 2; k++) out.push({ k, a: this.crossAlong(k) });
-        return out;
+        return [this.cityEdge.from, this.cityEdge.to].map((k) => ({ k, a: this.crossAlong(k) }));
     }
 
     nearestCross(along) {
@@ -157,20 +163,22 @@ class GameCore {
     }
 
     nextCross() {
-        return this.crossNear(this.along).filter((c) => c.a > this.along).reduce((b, c) => (c.a < b.a ? c : b));
+        const k = this.cityGraph.endpoint(this.cityEdge, this.cityReverse);
+        return { k, a: this.crossAlong(k) };
     }
 
     // узел карты для перекрёстка с поперечной улицей k
     node(k) {
-        return this.vertical ? [this.streetK, k] : [k, this.streetK];
+        const node = this.cityGraph.nodes.get(k);
+        return node ? [node.index, node.index * 7] : [0, 0];
     }
 
     arms(k) {
-        const [dx, dy] = this.dir, [i, j] = this.node(k);
+        const options = this.cityOptions(k);
         return {
-            straight: armExists(i, j, this.dir),
-            left: armExists(i, j, [dy, -dx]),
-            right: armExists(i, j, [-dy, dx]),
+            straight: Boolean(options.straight),
+            left: Boolean(options.left),
+            right: Boolean(options.right),
         };
     }
 
@@ -180,24 +188,185 @@ class GameCore {
     }
 
     get vertical() {
-        return this.dir[0] === 0;
+        return Math.abs(this.dir[1]) >= Math.abs(this.dir[0]);
     }
 
     currentStreet() {
-        return streetName(this.vertical, this.streetK);
+        return this.cityEdge.street;
     }
 
     compass() {
         const [dx, dy] = this.dir;
-        if (dy < 0) return "север";
-        if (dx > 0) return "восток";
-        if (dy > 0) return "юг";
-        return "запад";
+        return Math.abs(dx) > Math.abs(dy) ? dx > 0 ? "восток" : "запад" : dy < 0 ? "север" : "юг";
     }
 
     screenToWorld(screenY) {
         const ahead = this.bus.centerY - screenY;
         return [this.wx + this.dir[0] * ahead, this.wy + this.dir[1] * ahead];
+    }
+
+    // Только исходящие рёбра настоящего узла; ожидаемая улица маршрута имеет
+    // приоритет, если несколько близких съездов оказываются с одной стороны.
+    cityOptions(nodeId = this.nextCross().k) {
+        const result = { left: null, right: null, straight: null };
+        const nextLeg = this.cityItinerary.legs[(this.cityLegIndex + 1) % this.cityItinerary.legs.length];
+        const edges = [...(this.cityGraph.adjacent.get(nodeId) || [])]
+            .filter((edge) => edge.id !== this.cityEdge.id)
+            .sort((a, b) => Number(b.id === nextLeg.edge.id) - Number(a.id === nextLeg.edge.id));
+        for (const edge of edges) {
+            const option = this.cityGraph.fromNode(edge, nodeId);
+            const direction = this.cityGraph.direction(edge, option.reverse);
+            const dot = this.dir[0] * direction[0] + this.dir[1] * direction[1];
+            const cross = this.dir[0] * direction[1] - this.dir[1] * direction[0];
+            const side = dot > 0.64 || (edge.street === this.cityEdge.street && dot > -0.25)
+                ? "straight" : cross < 0 ? "left" : "right";
+            if (!result[side]) result[side] = { ...option, direction, node: nodeId,
+                angle: Math.atan2(cross, dot) };
+        }
+        return result;
+    }
+
+    cityEnter(option, nodeId) {
+        const legs = this.cityItinerary.legs;
+        const nextIndex = (this.cityLegIndex + 1) % legs.length;
+        const matches = (leg) => leg.edge.id === option.edge.id && leg.reverse === option.reverse;
+        let index = matches(legs[nextIndex]) ? nextIndex : -1;
+        if (index < 0) {
+            for (let step = 0; step < legs.length; step++) {
+                const candidate = (this.cityLegIndex + step) % legs.length;
+                if (matches(legs[candidate])) { index = candidate; break; }
+            }
+        }
+        this.cityOffRoute = index < 0;
+        if (index >= 0) {
+            if (index < this.cityLegIndex) this.cityLap++;
+            this.cityLegIndex = index;
+        }
+        this.cityEdge = option.edge;
+        this.cityReverse = option.reverse;
+        this.cityOffset = option.reverse ? option.edge.length : 0;
+        this.dir = this.cityGraph.direction(option.edge, option.reverse);
+        [this.wx, this.wy] = this.cityGraph.position(this.cityEdge, this.cityOffset);
+        this.streetK = this.cityEdge.index;
+        if (this.cityEdge.district && DISTRICTS[this.cityEdge.district]) this.district = this.cityEdge.district;
+        this.spawnedLines = new Set([nodeId]);
+        this.trail.push([this.wx, this.wy]);
+        if (this.spawnedCityStops.size > 1000) this.spawnedCityStops.clear();
+    }
+
+    cityTurnaround() {
+        if (this.cityOffRoute) return false;
+        const next = this.cityItinerary.legs[(this.cityLegIndex + 1) % this.cityItinerary.legs.length];
+        return next.edge.id === this.cityEdge.id && next.reverse !== this.cityReverse;
+    }
+
+    cityContinue(option, nodeId) {
+        this.cityEnter(option, nodeId);
+        // Последняя остановка за автобусом остаётся до конца проезда, чтобы
+        // не пропустить высадку/штраф. Впереди старого ребра объектов нет.
+        this.stops = this.stops.filter((stop) => stop.centerY >= this.bus.centerY);
+        this.inters = this.inters.filter((inter) => inter.y + inter.h >= this.bus.centerY);
+        for (const key of ["ramps", "posts", "crosswalks", "bridges", "stations"]) {
+            this[key] = this[key].filter((object) => object.y >= this.bus.centerY);
+        }
+        setRoad(this.cityEdge.lanes);
+        this.shifts = [];
+        this.openBelow = LANES / 2 - CLOSED;
+        this.newStrips();
+        for (const stop of this.stops) stop.edge = ROAD_RIGHT - this.closedW(stop.centerY);
+    }
+
+    // Общая точка движения для обычной езды и конвоя: нельзя выехать за
+    // конец ребра или оказаться на другой улице без общего перекрёстка.
+    advanceCity(distance) {
+        if (distance < 0) {
+            const room = this.cityReverse ? this.cityEdge.length - this.cityOffset : this.cityOffset;
+            const moved = Math.max(distance, -room);
+            this.cityOffset += this.cityReverse ? -moved : moved;
+            [this.wx, this.wy] = this.cityGraph.position(this.cityEdge, this.cityOffset);
+            if (moved !== distance) this.bus.speed = moved;
+            return moved;
+        }
+        const room = this.cityReverse ? this.cityOffset : this.cityEdge.length - this.cityOffset;
+        const moved = Math.min(distance, room);
+        this.cityOffset += this.cityReverse ? -moved : moved;
+        [this.wx, this.wy] = this.cityGraph.position(this.cityEdge, this.cityOffset);
+        if (distance > room) {
+            const nodeId = this.nextCross().k, options = this.cityOptions(nodeId);
+            if (options.straight && !this.cityTurnaround()) {
+                this.cityContinue(options.straight, nodeId);
+                return moved + this.advanceCity(distance - room);
+            } else if (this.cityTurnaround() || (!options.left && !options.right && !options.straight)) {
+                const terminal = this.inters.find((inter) => inter.k === nodeId) ||
+                    new Intersection(this.bus.centerY - 100, nodeId, this.currentStreet(), 2,
+                        { left: false, right: true, straight: false });
+                this.startTurn(1, terminal, { edge: this.cityEdge, reverse: !this.cityReverse,
+                    node: nodeId, direction: this.dir.map((value) => -value), angle: Math.PI });
+                this.showBanner("Конечная. Обратный рейс", YELLOW);
+            } else this.bus.speed = 0;
+        }
+        return moved;
+    }
+
+    cityNavigation() {
+        const legs = this.cityItinerary.legs, next = legs[(this.cityLegIndex + 1) % legs.length];
+        if (this.cityOffRoute) return "Вне маршрута — вернись к линии на карте";
+        const options = this.cityOptions(), side = Object.keys(options)
+            .find((key) => options[key]?.edge.id === next.edge.id && options[key].reverse === next.reverse);
+        if (!side) return "Конечная: разворот";
+        const arrow = { left: "←", right: "→", straight: "↑" }[side];
+        const distance = Math.max(0, this.nextCross().a - this.along);
+        return `${arrow} ${next.edge.street} · ${Math.round(distance * METERS_PER_PX)} м`;
+    }
+
+    spawnCityStops() {
+        const leg = this.cityItinerary.legs[this.cityLegIndex];
+        const definitions = [];
+        if (!this.cityOffRoute) for (const stop of leg.stops) {
+            const id = this.cityLap * this.cityItinerary.stopCount + stop.sequence;
+            definitions.push({ ...stop, id, key: `ours:${id}`, route: this.route.num });
+        }
+        for (const [number, route] of Object.entries(this.cityGraph.data.routes)) {
+            if (number === this.route.num) continue;
+            for (const [index, stop] of [...(route.stops || []), ...(route.returnStops || [])].entries()) {
+                if (stop.edge === this.cityEdge.id && (stop.reverse ?? false) === this.cityReverse &&
+                    !definitions.some((own) => own.name === stop.name && Math.abs(own.at - stop.at) < 0.04)) {
+                    definitions.push({ ...stop, id: null,
+                        key: `other:${number}:${index}:${this.cityLap}:${this.cityLegIndex}`, route: number });
+                }
+            }
+        }
+        for (const definition of definitions) {
+            if (this.spawnedCityStops.has(definition.key)) continue;
+            const offset = definition.at * this.cityEdge.length;
+            const ahead = (offset - this.cityOffset) * (this.cityReverse ? -1 : 1);
+            if (ahead < -BusStop.HEIGHT || ahead > this.bus.centerY + 500) continue;
+            const y = this.bus.centerY - ahead - BusStop.HEIGHT / 2;
+            // В отличие от случайного спавна остановка не переезжает дальше
+            // из-за поста/трамплина: необязательные объекты уступают её месту.
+            this.ramps = this.ramps.filter((ramp) => Math.abs(ramp.y - y) > 500);
+            this.posts = this.posts.filter((post) => Math.abs(post.y - y) > 600);
+            this.crosswalks = this.crosswalks.filter((crosswalk) => Math.abs(crosswalk.y - y) > 400);
+            this.shifts = this.shifts.filter((shift) => Math.abs(shift.y - y) > 600);
+            const stop = new BusStop(definition.id, y, this.route, this.rep, definition);
+            stop.edge = ROAD_RIGHT - this.closedW(stop.centerY);
+            stop.cityEdge = this.cityEdge.id;
+            stop.cityOffset = offset;
+            this.stops.push(stop);
+            this.spawnedCityStops.add(definition.key);
+            if (definition.id !== null) this.nextStopId = Math.max(this.nextStopId, definition.id + 1);
+        }
+    }
+
+    spawnCityBridge() {
+        if (!/мост/i.test(this.cityEdge.street) || this.bridges.some((bridge) => bridge.cityEdge === this.cityEdge.id)) return;
+        const h = Math.max(500, this.cityEdge.length - 900);
+        const offset = this.cityEdge.length / 2;
+        const ahead = (offset - this.cityOffset) * (this.cityReverse ? -1 : 1);
+        if (ahead > h / 2 + this.bus.centerY + 1000 || ahead < -h / 2 - 500) return;
+        const bridge = new Bridge(this.bus.centerY - ahead - h / 2, h);
+        bridge.cityEdge = this.cityEdge.id;
+        this.bridges.push(bridge);
     }
 
     // --- вспомогательное ---
@@ -510,19 +679,23 @@ class GameCore {
     }
 
     spawnObjects() {
-        // перекрёстки стоят по (неровной) сетке города; если поперечная улица сюда не доходит — едем дальше
+        // Перекрёстки и остановки привязаны к графу, а не к случайной сетке.
         const nx = this.nextCross();
         if (!this.spawnedLines.has(nx.k) && nx.a - this.along < this.bus.centerY + 900) {
             this.spawnedLines.add(nx.k);
             const arms = this.arms(nx.k);
-            if (arms.left || arms.right) {
-                const lanes = streetLanes(!this.vertical, nx.k), h = roadWidthFor(lanes);
+            const options = this.cityOptions(nx.k);
+            if (arms.left || arms.right || !arms.straight) {
+                const cross = options.left || options.right;
+                const lanes = cross?.edge.lanes || 2, h = roadWidthFor(lanes);
                 const y = this.bus.centerY - (nx.a - this.along) - h / 2;
-                const inter = new Intersection(y, nx.k, streetName(!this.vertical, nx.k), lanes, arms);
+                const inter = new Intersection(y, nx.k, cross?.edge.street || "Конечная", lanes, arms);
                 inter.closed = this.closedLanesAt(y + h / 2);
                 this.inters.push(inter);
             }
         }
+        this.spawnCityStops();
+        this.spawnCityBridge();
         if (this.inters.some((i) => !i.arms.straight && i.y > -200)) {
             // впереди тупик: за ним ничего не появляется
             for (const k in this.nextIn) this.nextIn[k] = Math.max(this.nextIn[k], 300);
@@ -530,23 +703,6 @@ class GameCore {
 
         const s = this.bus.speed, route = this.route;
         for (const k in this.nextIn) this.nextIn[k] -= s;
-        // смена района
-        this.districtLeft -= Math.max(0, s);
-        if (this.districtLeft <= 0) {
-            const options = route.districts.filter((d) => d !== this.district);
-            this.district = choice(options.length ? options : route.districts);
-            this.districtLeft = rand(3500, 6000);
-            this.showBanner(`Район: ${DISTRICTS[this.district].name}`, [180, 230, 180], 120);
-        }
-        if (this.nextIn.stop <= 0) {
-            const y = -BusStop.HEIGHT - 60;
-            if (this.areaFree(y, BusStop.HEIGHT)) {
-                const stop = new BusStop(Math.random() < 0.72 ? this.nextStopId++ : null, y, route, this.rep);
-                stop.edge = ROAD_RIGHT - this.closedW(y + BusStop.HEIGHT / 2);   // карман у открытого края
-                this.stops.push(stop);
-                this.nextIn.stop = rand(...route.stopGap);
-            } else this.nextIn.stop = 200;
-        }
         if (this.nextIn.cross <= 0) {
             const y = -Crosswalk.H - 80;
             if (this.areaFree(y, Crosswalk.H)) {
@@ -571,16 +727,6 @@ class GameCore {
                 this.stations.push(new PoliceStation(y, ROAD_RIGHT - this.closedW(y + PoliceStation.HEIGHT / 2)));
                 this.nextIn.station = rand(12000, 22000);
             } else this.nextIn.station = 300;
-        }
-        if (this.nextIn.bridge <= 0) {
-            const h = randint(220, 360), y = -h - 80;
-            // мост не должен налезать на перекрёсток
-            const from = this.along + this.bus.centerY - (y + h);
-            const nearLine = this.crossNear(from).some((c) => c.a > from - 500 && c.a < from + h + 500);
-            if (this.areaFree(y, h) && !nearLine && Math.random() < DISTRICTS[this.district].bridge) {
-                this.bridges.push(new Bridge(y, h));
-                this.nextIn.bridge = rand(3000, 6000);
-            } else this.nextIn.bridge = 400;
         }
         if (this.nextIn.ramp <= 0) {
             const y = -Ramp.H - 60;
@@ -624,7 +770,7 @@ class GameCore {
     tryTurn() {
         const bus = this.bus;
         const steer = this.keys.right - this.keys.left;
-        if (!steer || bus.air || bus.speed < 0.5) return;
+        if (!steer || bus.air || bus.speed < 0) return;
         // направо — прижавшись к правому краю, налево — из левой своей полосы (или со встречки)
         const [, right] = bus.xLimits;
         const ready = steer < 0 ? bus.x <= laneCenter(ownFirst()) + 6 : bus.x >= right - 1;
@@ -633,33 +779,39 @@ class GameCore {
         if (inter && (steer < 0 ? inter.arms.left : inter.arms.right)) this.startTurn(steer, inter);
     }
 
-    startTurn(sign, inter) {
+    startTurn(sign, inter, terminalOption = null) {
         const bus = this.bus;
+        const nodeId = this.nextCross().k;
+        const options = this.cityOptions(nodeId);
+        const option = terminalOption || options[sign > 0 ? "right" : "left"];
+        const node = this.cityGraph.nodes.get(nodeId);
+        const terminal = this.cityTurnaround() || (!options.straight && !options.left && !options.right);
+        if (!option || inter.k !== nodeId ||
+            this.cityGraph.origin(option.edge, option.reverse) !== nodeId ||
+            (option.edge.id === this.cityEdge.id && !terminal) ||
+            Math.hypot(this.wx - node.x, this.wy - node.y) > Math.max(inter.h / 2 + 30, 240)) return false;
+        window.citySession?.captureTurn(this);
         // снимок старой улицы: во время поворота камера плавно доворачивает с неё на новую
         this.drawWorld(false);
         this.snapshot.getContext("2d").drawImage(canvas, 0, 0);
         this.turnStart = [bus.x, bus.centerY];
         this.turnTotal = this.turnT = Math.round(clamp(300 / Math.max(bus.speed, 3), 34, 80));
         this.turnSign = sign;
+        this.turnAngle = option.angle;
         this.state = "turning";
         const drift = bus.speed > 8;
-        const oldStreet = this.currentStreet(), oldK = this.streetK, oldLanes = LANES;
+        const oldStreet = this.currentStreet(), oldLanes = LANES;
         // ДПС далеко позади — потеряли маршрутку за углом
         const lost = !this.heli && this.police && !this.police.leaving && this.police.y > bus.y + bus.h + 100 + 60 * this.stars;
 
-        // встаём ровно в узел сетки и меняем направление
-        if (this.vertical) this.wy = gridPos("y", inter.k);
-        else this.wx = gridPos("x", inter.k);
-        const [dx, dy] = this.dir;
-        this.dir = sign > 0 ? [-dy, dx] : [dy, -dx];
-        this.streetK = inter.k;
-        setRoad(streetLanes(this.vertical, this.streetK));
-        this.trail.push([this.wx, this.wy]);
+        // Обе улицы сходятся именно в этом узле: координаты не перескакивают
+        // на улицу с тем же индексом в другом конце бесконечной сетки.
+        this.cityEnter(option, nodeId);
+        setRoad(this.cityEdge.lanes);
         this.turns += 1;
 
-        // новая улица: свои непройденные остановки переносим на неё
-        const unvisited = this.stops.filter((s) => s.ours && !s.visited).map((s) => s.id);
-        if (unvisited.length) this.nextStopId = Math.min(...unvisited);
+        // Остановки остаются на своих улицах. На новой улице появятся только
+        // закреплённые за её ребром остановки текущего направления рейса.
         this.cars = [];
         this.stops = [];
         this.ramps = [];
@@ -670,12 +822,11 @@ class GameCore {
         this.skids = [];
         this.particles = this.particles.filter((p) => !p.world);
         this.texts = [];
-        if (Math.random() < 0.5) this.district = choice(this.route.districts);
         this.newStrips();
         this.scenery = new Scenery(this);
         // перекрёсток, с которого съехали: старая улица теперь поперечная, она позади маршрутки
-        this.spawnedLines = new Set([oldK]);
-        const ni = new Intersection(bus.centerY + 40, oldK, oldStreet, oldLanes, this.arms(oldK));
+        this.spawnedLines = new Set([nodeId]);
+        const ni = new Intersection(bus.centerY + 40, nodeId, oldStreet, oldLanes, this.arms(nodeId));
         ni.t = 0;
         ni.passed = true;
         this.inters = [ni];
@@ -698,6 +849,7 @@ class GameCore {
         }
         this.showBanner(`Поворот ${sign > 0 ? "направо" : "налево"}: ${this.currentStreet()}`, BLUE);
         if (drift) this.stunt("Дрифт-поворот!", 120);
+        return true;
     }
 
 }

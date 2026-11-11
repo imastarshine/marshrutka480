@@ -195,6 +195,7 @@ class GameRender extends GameUpdate {
         this.drawMotorcade();
         if (this.police) this.police.draw(this.frame);
         for (const i of this.inters) i.drawLights(this.frame);
+        window.citySession?.drawPlayers(this);
         for (const p of this.particles) if (p.world) p.draw();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx = screenCtx;
@@ -236,12 +237,12 @@ class GameRender extends GameUpdate {
     drawTurning() {
         // Маршрутка едет по дуге, камера плавно доворачивает за ней; старая улица растворяется в новой
         const u = 1 - this.turnT / this.turnTotal, k = smooth(u);
-        const sign = this.turnSign, theta = (sign * Math.PI) / 2, phi = theta * k;
+        const sign = this.turnSign, theta = this.turnAngle ?? (sign * Math.PI) / 2, phi = theta * k;
         const [sx, sy] = this.turnStart;
         // позиция и курс маршрутки в координатах старой улицы
-        const a = (u * Math.PI) / 2;
+        const a = u * Math.abs(theta);
         const B = [sx + sign * TURN_RADIUS * (1 - Math.cos(a)), sy - TURN_RADIUS * Math.sin(a)];
-        const E = [sx + sign * TURN_RADIUS, sy - TURN_RADIUS];
+        const E = [sx + sign * TURN_RADIUS * (1 - Math.cos(Math.abs(theta))), sy - TURN_RADIUS * Math.sin(Math.abs(theta))];
         const E2 = [this.bus.x, this.bus.centerY];                   // та же точка на новой улице
         const target = [sx + (E2[0] - sx) * k, sy + (E2[1] - sy) * k];
 
@@ -250,7 +251,7 @@ class GameRender extends GameUpdate {
         ctx.translate(target[0], target[1]);
         ctx.rotate(-phi);
         ctx.translate(-B[0], -B[1]);
-        // новая улица: повёрнута на 90° относительно старой
+        // Новая улица повёрнута на угол её реального соседнего ребра.
         ctx.save();
         ctx.translate(E[0], E[1]);
         ctx.rotate(theta);
@@ -266,7 +267,7 @@ class GameRender extends GameUpdate {
     }
 
     drawMinimap() {
-        const size = 120, bx = 6, by = HEIGHT - size - 26;
+        const size = window.citySession?.active ? 154 : 120, bx = 6, by = HEIGHT - size - 26;
         fillRect(bx, by, size, size, [15, 20, 25], 0.82);
         const scale = 40 / BLOCK, cx = bx + size / 2, cy = by + size / 2;
         const toMap = (x, y) => [cx + (x - this.wx) * scale, cy + (y - this.wy) * scale];
@@ -275,20 +276,11 @@ class GameRender extends GameUpdate {
         ctx.beginPath();
         ctx.rect(bx, by, size, size);
         ctx.clip();
-        // неровная сетка: проспекты толще, узкие улицы местами обрываются
-        const i0 = Math.round(this.wx / BLOCK), j0 = Math.round(this.wy / BLOCK);
-        for (let i = i0 - 3; i <= i0 + 3; i++) {
-            for (let j = j0 - 3; j <= j0 + 3; j++) {
-                const [x, y] = toMap(gridPos("x", i), gridPos("y", j));
-                if (segExists(true, i, j)) {
-                    const [, y2] = toMap(0, gridPos("y", j + 1));
-                    line(x, y, x, y2, [90, 95, 100], streetLanes(true, i));
-                }
-                if (segExists(false, j, i)) {
-                    const [x2] = toMap(gridPos("x", i + 1), 0);
-                    line(x, y, x2, y, [90, 95, 100], streetLanes(false, j));
-                }
-            }
+        const routeEdges = new Set(this.cityItinerary.legs.map((leg) => leg.edge.id));
+        for (const edge of this.cityGraph.edges.values()) {
+            const from = this.cityGraph.nodes.get(edge.from), to = this.cityGraph.nodes.get(edge.to);
+            const [x, y] = toMap(from.x, from.y), [x2, y2] = toMap(to.x, to.y);
+            line(x, y, x2, y2, routeEdges.has(edge.id) ? [65, 130, 140] : [90, 95, 100], Math.max(2, edge.lanes / 2));
         }
         const pts = [...this.trail, [this.wx, this.wy]].map(([x, y]) => toMap(x, y));
         ctx.strokeStyle = col([200, 160, 40]);
@@ -297,7 +289,9 @@ class GameRender extends GameUpdate {
         pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
         ctx.stroke();
         for (const s of this.stops) {
-            const [px, py] = toMap(...this.screenToWorld(s.centerY));
+            const edge = this.cityGraph.edges.get(s.cityEdge);
+            const position = edge ? this.cityGraph.position(edge, s.cityOffset) : this.screenToWorld(s.centerY);
+            const [px, py] = toMap(...position);
             circle(px, py, 3, s.ours ? YELLOW : [220, 70, 60]);
         }
         for (const p of this.posts) {
@@ -308,6 +302,7 @@ class GameRender extends GameUpdate {
             const [px, py] = toMap(...this.screenToWorld(this.police.y));
             circle(px, py, 4, [255, 60, 60]);
         }
+        window.citySession?.drawMinimap(this, {bx,by,size,toMap,cx,cy});
         const [dx, dy] = this.dir;
         poly([[cx + dx * 8, cy + dy * 8], [cx - dx * 5 - dy * 5, cy - dy * 5 + dx * 5],
             [cx - dx * 5 + dy * 5, cy - dy * 5 - dx * 5]], YELLOW);
@@ -315,6 +310,10 @@ class GameRender extends GameUpdate {
         strokeRect(bx, by, size, size, [200, 200, 200], 1);
         text("С", bx + size - 12, by + 3, RED, 11, { bold: true });
         text(`${this.currentStreet()}, на ${this.compass()}`, bx, by + size + 5, WHITE, 11, { bold: true });
+        const navigation = this.cityNavigation();
+        const nw = Math.min(WIDTH - 12, textWidth(navigation, 12, true) + 18);
+        panel(bx, by - 29, nw, 23, 0.84, this.cityOffRoute ? ORANGE : BLUE);
+        text(navigation, bx + 8, by - 24, this.cityOffRoute ? ORANGE : WHITE, 12, { bold: true });
     }
 
     drawHud() {

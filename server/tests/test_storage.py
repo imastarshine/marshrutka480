@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import closing
 import asyncio
 import sqlite3
 import tempfile
@@ -99,7 +100,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual([row["username"] for row in board], ["Алиса", "Борис"])
         self.assertEqual([row["score"] for row in board], [900, 700])
         self.assertEqual([row["rank"] for row in board], [1, 2])
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0], 4)
         self.assertEqual(len(self.db.leaderboard(1)), 1)
 
@@ -130,5 +131,5 @@ class DatabaseTests(unittest.TestCase):
         self.assertIsNone(self.db.session(valid))
         for i in range(12):
             self.db.create_session(token_hash(f"session-{i}"), self.alice["id"], int(time.time()) + 3600)
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             self.assertLessEqual(conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 5)

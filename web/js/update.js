@@ -229,7 +229,14 @@ class GameUpdate extends GameCore {
     }
 
     updateStops() {
-        for (const s of this.stops) s.y += this.bus.speed;
+        for (const stop of this.stops) {
+            const edge = this.cityGraph.edges.get(stop.cityEdge);
+            if (edge) {
+                const [x, y] = this.cityGraph.position(edge, stop.cityOffset);
+                const ahead = (x - this.wx) * this.dir[0] + (y - this.wy) * this.dir[1];
+                stop.y = this.bus.centerY - ahead - BusStop.HEIGHT / 2;
+            } else stop.y += this.bus.speed;
+        }
         for (const stop of this.stops.filter((s) => s.y > HEIGHT + 40)) {
             this.stops.splice(this.stops.indexOf(stop), 1);
             if (!stop.ours) continue;
@@ -275,7 +282,7 @@ class GameUpdate extends GameCore {
             this.styleBelow = t.style;
         }
         this.shifts = this.shifts.filter((t) => t.y <= HEIGHT + 700);
-        this.bridges = this.bridges.filter((b) => b.y > -1200 && b.y < HEIGHT + 400);
+        this.bridges = this.bridges.filter((b) => b.y + b.h > -1200 && b.y < HEIGHT + 400);
         for (const cw of this.crosswalks) {
             cw.y += s;
             const visible = cw.y > -200 && cw.y < HEIGHT;
@@ -291,7 +298,12 @@ class GameUpdate extends GameCore {
         }
         this.crosswalks = this.crosswalks.filter((c) => c.y > -800 && c.y < HEIGHT + 300);
         for (const inter of this.inters) {
-            inter.update(s, busClose(inter.zebraTop), bus);
+            const node = this.cityGraph.nodes.get(inter.k);
+            if (node) {
+                const ahead = (node.x - this.wx) * this.dir[0] + (node.y - this.wy) * this.dir[1];
+                inter.y = bus.centerY - ahead - inter.h / 2;
+            }
+            inter.update(node ? 0 : s, busClose(inter.zebraTop), bus);
 
             this.checkPeds(inter.peds, inter.zebraTop);
             if (!inter.passed && bus.y < inter.stopLine && !bus.air) {
@@ -370,7 +382,7 @@ class GameUpdate extends GameCore {
             this.stopsServed += 1;
             if (this.stopsServed % 5 === 0) {
                 const lap = this.stopsServed / 5;
-                this.missionComplete("КРУГ ПРОЙДЕН!", 100 + 50 * lap, 2);
+                this.missionComplete("5 ОСТАНОВОК!", 100 + 50 * lap, 2);
             }
             this.showBanner(`Остановка «${stop.name}». Двери открываются!`, YELLOW);
             this.floatText("Остановка!", bus.x, bus.y - 20, YELLOW, true);
@@ -586,8 +598,8 @@ class GameUpdate extends GameCore {
         bus.invuln = 0;
         this.scroll += s;
         this.distance += s;
-        this.wx += this.dir[0] * s;
-        this.wy += this.dir[1] * s;
+        this.advanceCity(s);
+        if (this.state === "turning") return;
         this.scenery.update(s);
         for (const list of [this.stops, this.ramps, this.posts, this.crosswalks, this.bridges, this.stations, this.shifts, this.inters, this.skids]) {
             for (const o of list) o.y += s;
@@ -758,7 +770,7 @@ class GameUpdate extends GameCore {
         // тупик: дальше не проехать, только повернуть
         for (const inter of this.inters) {
             const room = bus.y - (inter.y + 6);
-            if (!inter.arms.straight && bus.speed > room && room > -200) {
+            if (!this.cityTurnaround() && !inter.arms.straight && (inter.arms.left || inter.arms.right) && bus.speed > room && room > -200) {
                 bus.speed = Math.max(0, room);
                 if (this.frame % 90 === 0) this.showBanner("Тупик! Поверни налево или направо", ORANGE, 80);
             }
@@ -776,10 +788,11 @@ class GameUpdate extends GameCore {
             if (++this.wrongWay === 90) this.startChase("выезд на встречку", 0.4);
         } else this.wrongWay = 0;
 
-        this.distance += Math.abs(bus.speed);
-        this.scroll += bus.speed;
-        this.wx += this.dir[0] * bus.speed;
-        this.wy += this.dir[1] * bus.speed;
+        const travelled = this.advanceCity(bus.speed);
+        this.distance += Math.abs(travelled);
+        this.scroll += travelled;
+        if (this.state === "turning") return;
+        bus.speed = travelled;
         if (this.frame % 20 === 0) {
             this.trail.push([this.wx, this.wy]);
             this.trail = this.trail.slice(-300);
