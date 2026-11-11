@@ -93,6 +93,7 @@ cd server
 ```bash
 python -m pip install -r requirements-browser.txt
 python tests/browser_smoke.py
+python tests/browser_cache_update.py
 ```
 
 Она использует установленный Google Chrome, временную базу и два независимых

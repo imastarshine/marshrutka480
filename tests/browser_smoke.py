@@ -132,9 +132,32 @@ with tempfile.TemporaryDirectory(prefix="m480-city-browser-") as temp:
             mark("own bus responds before 350 ms of simulated network delay: "+str(round(result["elapsed"]))+" ms")
 
             first.locator("canvas").focus()
-            first.keyboard.down("ArrowUp");first.wait_for_timeout(1400);first.keyboard.up("ArrowUp")
-            first.keyboard.down("ArrowDown");first.wait_for_timeout(700);first.keyboard.up("ArrowDown")
+            drive_start=first.evaluate("({wx:game.wx,wy:game.wy,speed:game.bus.speed,state:game.state})")
+            first.evaluate("""async () => {
+                const start=[game.wx,game.wy];
+                const key=(code,down)=>window.dispatchEvent(new KeyboardEvent(down?'keydown':'keyup',{code,bubbles:true}));
+                const until=condition=>new Promise((resolve,reject)=>{
+                    const deadline=performance.now()+10000;
+                    const poll=()=>{
+                        if(game.state!=='play')return reject(new Error('Drive interrupted: '+game.state));
+                        if(condition())return resolve();
+                        if(performance.now()>deadline)return reject(new Error('Bounded drive timed out'));
+                        requestAnimationFrame(poll);
+                    };
+                    requestAnimationFrame(poll);
+                });
+                // Stop by world distance inside the animation loop. A delayed
+                // automation keyup under CPU load must not drive out of view.
+                key('ArrowUp',true);
+                try{await until(()=>Math.hypot(game.wx-start[0],game.wy-start[1])>=200);}
+                finally{key('ArrowUp',false);}
+                key('ArrowDown',true);
+                try{await until(()=>Math.abs(game.bus.speed)<.3);}
+                finally{key('ArrowDown',false);}
+            }""")
             wait(second,"citySession.players().some(p=>p.username==='Driver_City_A' && Math.hypot(p.wx-game.wx,p.wy-game.wy)>20)")
+            projection={"before":drive_start,"first":first.evaluate("({wx:game.wx,wy:game.wy,speed:game.bus.speed,state:game.state,frame:game.frame})"),"second":second.evaluate("({wx:game.wx,wy:game.wy,state:game.state,drawn:citySession.drawnPlayers,players:citySession.players().map(p=>({...p,visible:citySession.visible(p),projection:citySession.project(game,p)}))})")}
+            (OUT/"city-presence-projection.json").write_text(json.dumps(projection,ensure_ascii=False,indent=2),encoding="utf-8")
             wait(second,"citySession.drawnPlayers === 1")
             assert first.evaluate("citySession.mapMarkersCount === 1")
             second.screenshot(path=str(OUT/"city-desktop.png"))

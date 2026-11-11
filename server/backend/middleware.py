@@ -71,6 +71,10 @@ class SecurityMiddleware:
                 ]
                 if api:
                     additional.append((b"cache-control",b"no-store"))
+                elif not any(key.lower() == b"cache-control" for key, _ in message.get("headers", [])):
+                    # Revalidate static resources after a deploy. HTML supplies
+                    # content-versioned URLs, including for previously cached JS.
+                    additional.append((b"cache-control",b"no-cache, max-age=0, must-revalidate"))
                 if self.settings.environment=="production":
                     additional.append((b"strict-transport-security",b"max-age=31536000"))
                 message["headers"] = list(message.get("headers",[]))+additional

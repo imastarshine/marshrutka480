@@ -15,10 +15,11 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, 
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
+from .assets import versioned_index
 from .config import Settings
 from .database import Database
 from .middleware import SecurityMiddleware
@@ -106,7 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok":True,"version":"2.1.0","protocol":1,"features":["original-city","world-poses","irkutsk-routes"]}
+        return {"ok":True,"version":"2.1.1","protocol":1,"features":["original-city","world-poses","irkutsk-routes"]}
 
     @app.post("/api/auth/register",status_code=201)
     async def register(body: Credentials, request: Request):
@@ -308,6 +309,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await write_task
 
     if Path(settings.web_path).is_dir():
+        index_html = versioned_index(settings.web_path)
+
+        @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+        @app.api_route("/index.html", methods=["GET", "HEAD"], include_in_schema=False)
+        async def index(request: Request):
+            response = HTMLResponse(index_html, headers={"Cache-Control": "no-store"})
+            if request.method == "HEAD":
+                response.body = b""
+            return response
+
         app.mount("/",StaticFiles(directory=settings.web_path,html=True),name="web")
     return app
 
