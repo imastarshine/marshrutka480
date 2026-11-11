@@ -19,6 +19,7 @@ class CitySession {
         this.drawnPlayers = 0;
         this.authoritativeTrafficEnabled = false;
         this.trafficSamples = new Map();
+        this.pedestrianSamples = new Map();
         this.trafficFirstSeen = new Map();
         this.drawnTraffic = 0;
     }
@@ -34,14 +35,14 @@ class CitySession {
         this.serverPerfOffset = null; this.lastRenderTime = -Infinity;
         this.turnFrom = null; this.mapMarkersCount = 0; this.drawnPlayers = 0;
         this.screenRoadCache = null;
-        this.authoritativeTrafficEnabled = false; this.trafficSamples.clear(); this.trafficFirstSeen.clear(); this.drawnTraffic = 0;
+        this.authoritativeTrafficEnabled = false; this.trafficSamples.clear(); this.pedestrianSamples.clear(); this.trafficFirstSeen.clear(); this.drawnTraffic = 0;
     }
     receive(state) {
         if (state.room?.mode !== "city") return;
         const now = performance.now();
         if (this.state && (this.state.room.code !== state.room.code || this.state.seed !== state.seed || this.state.world?.id !== state.world?.id)) {
             this.samples.clear(); this.serverPerfOffset = null; this.lastRenderTime = -Infinity;
-            this.trafficSamples.clear(); this.trafficFirstSeen.clear(); this.authoritativeTrafficEnabled = false;
+            this.trafficSamples.clear(); this.pedestrianSamples.clear(); this.trafficFirstSeen.clear(); this.authoritativeTrafficEnabled = false;
         }
         const packetTime = Number.isFinite(state.server_time) ? state.server_time * 1000 : Date.now();
         const observedOffset = packetTime - now;
@@ -75,6 +76,16 @@ class CitySession {
             for (const id of this.trafficSamples.keys()) if (!trafficIds.has(id)) {
                 this.trafficSamples.delete(id); this.trafficFirstSeen.delete(id);
             }
+        }
+        if(Array.isArray(state.pedestrians)){
+            const ids=new Set(), time=Number.isFinite(state.traffic_server_time)?state.traffic_server_time*1000:packetTime;
+            for(const person of state.pedestrians){
+                if(!Number.isFinite(person.wx)||!Number.isFinite(person.wy)||!Number.isFinite(person.angle))continue;
+                ids.add(person.id);const samples=this.pedestrianSamples.get(person.id)||[];
+                if(!samples.length||time>samples.at(-1).time)samples.push({time,pose:person});
+                this.pedestrianSamples.set(person.id,samples.slice(-8));
+            }
+            for(const id of this.pedestrianSamples.keys())if(!ids.has(id))this.pedestrianSamples.delete(id);
         }
         this.state = state;
         this.received = now;
@@ -148,6 +159,21 @@ class CitySession {
                 collidable:now-this.received<1000});
         }
         return result;
+    }
+    pedestrians(now=performance.now()) {
+        if(!this.authoritativeTraffic)return [];
+        const target=Math.max(this.lastRenderTime,now+(this.serverPerfOffset??0)-this.renderDelay), result=[];
+        for(const samples of this.pedestrianSamples.values()){
+            let before=samples[0],after=null;
+            for(const sample of samples){if(sample.time<=target)before=sample;else{after=sample;break;}}
+            const pose=before.pose;
+            if(after&&after!==before){
+                const t=clamp((target-before.time)/Math.max(1,after.time-before.time),0,1),next=after.pose;
+                result.push({...pose,wx:pose.wx+(next.wx-pose.wx)*t,wy:pose.wy+(next.wy-pose.wy)*t});
+            }else result.push(pose);
+        }
+        const age=now-this.received,alpha=clamp(1-Math.max(0,age-1500)/4000,.3,1);
+        return result.map(pose=>({...pose,alpha,moving:pose.moving&&age<1000}));
     }
     trafficProxies(g, now = performance.now()) {
         return this.traffic(now).map((actor) => {

@@ -31,6 +31,7 @@ class GameCore {
         if (this.localTraffic?.graph !== this.cityGraph || this.localTraffic?.geometry !== this.cityMapGeometry) {
             this.localTraffic = new LocalCityTraffic(this.cityGraph, this.cityMapGeometry);
         }
+        if (this.cityCrossings?.graph !== this.cityGraph) this.cityCrossings = new CityCrossings(this.cityGraph,this.cityMapGeometry);
         this.cityCamera = new CityCamera();
         this.cityActorFrame = -1; this.cityActors = [];
         this.cityItinerary = this.cityGraph.itinerary(this.route.num);

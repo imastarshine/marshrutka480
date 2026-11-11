@@ -117,6 +117,16 @@ python scripts/import_irkutsk_osm.py
 объединяются через однозначную цепочку дороги до ближайшего разветвления
 в пределах 600 игровых единиц. Реальные программы светофоров неизвестны.
 
+В beta.4 подключены 2 526 исходных узлов `highway=crossing`. Разметка выводится
+по `crossing:markings` либо обозначениям `crossing=marked/uncontrolled/zebra`;
+`crossing:markings=no` и `crossing=unmarked` не превращаются в зебру.
+Источники значений: [OSM crossing](https://wiki.openstreetmap.org/wiki/Key:crossing)
+и [crossing:markings](https://wiki.openstreetmap.org/wiki/Key:crossing:markings).
+Неизвестная разметка остаётся неизвестной. При `foot=no` люди не создаются.
+Сведения `crossing=traffic_signals` / `crossing:signals=yes` также используются
+для регулирования перехода. Два направления одного двустороннего перехода
+получают одну физическую группу светофора; фазы остаются синтетическими.
+
 Расписания и цены проезда из справочников не воспроизводятся: тарифы, длительность
 смены, стоимость открытия маршрутов и улучшений относятся к игровому балансу.
 

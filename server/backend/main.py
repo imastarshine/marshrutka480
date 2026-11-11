@@ -34,7 +34,7 @@ from .security import RateLimiter, bounded_thread_work, hash_password, token_has
 logger = logging.getLogger("marshrutka")
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{40,128}\Z")
 CODE_PATTERN = re.compile(r"[A-Z2-9]{6}\Z")
-SERVER_REVISION = "2.3.0-beta.3"
+SERVER_REVISION = "2.3.0-beta.4"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -113,7 +113,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok":True,"version":SERVER_REVISION,"protocol":1,"features":["original-city","world-poses","irkutsk-routes","osm-road-geometry","public-city","guest-access","shared-traffic"]}
+        return {"ok":True,"version":SERVER_REVISION,"protocol":1,"features":["original-city","world-poses","irkutsk-routes","osm-road-geometry","public-city","guest-access","shared-traffic","source-crossings","shared-pedestrians"]}
 
     @app.post("/api/bug-reports", status_code=201)
     async def bug_report(body: BugReport, user=Depends(identity)):

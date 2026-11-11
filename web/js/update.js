@@ -14,6 +14,7 @@ class GameUpdate extends GameCore {
     // --- обновление ---
     updateCars() {
         if (this.unifiedWorld) {
+            this.cityCrossings.update(this);
             if (!this.networkTrafficRequired) this.localTraffic?.update(this, 1 / 60);
             this.cityActorFrame = -1;
             this.cityTrafficActors();

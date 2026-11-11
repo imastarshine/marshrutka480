@@ -128,6 +128,7 @@ class CityWorldRenderer {
                 drawCarBody(rect(-(car.w||50)/2,-(car.h||92)/2,car.w||50,car.h||92),car.color||[145,155,165],car.braking);
                 ctx.restore(); if(session)session.drawnTraffic++;
             }
+            game.cityCrossings.drawPeople(game,layer,camera.bounds);
             if (session?.active) for (const player of players) {
                 if (actorLayer(player) !== layer) continue;
                 if (!session.visible(player)) continue;
@@ -169,6 +170,7 @@ class CityWorldRenderer {
             ctx.fillStyle=col(ASPHALT);
             for (const [,mesh] of entries) ctx.fill(mesh.road);
             for (const [edge,mesh] of entries) this.markings(edge,mesh);
+            game.cityCrossings.drawRoad(entries.map(([edge])=>edge),camera.bounds);
             for (const [edge] of entries) { this.stopPlatforms(game,edge); this.controls(game,edge); }
             drawActors(layer);
         }

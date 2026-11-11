@@ -86,6 +86,7 @@ class CityRoom:
                 "world": {"authoritative_traffic": True, "version": 2, "id": self.round_id,
                           "traffic_tick": self.tick},
                 "traffic": self.traffic.snapshot(),
+                "pedestrians": self.traffic.pedestrians.snapshot(),
                 "traffic_server_time": self.world_time,
                 "tick": self.tick, "results": [], "ranked": False}
 

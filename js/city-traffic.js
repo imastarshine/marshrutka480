@@ -405,7 +405,7 @@ class LocalCityTraffic {
             const priority = control.stop || control.yield || car.yieldPending ? -1 : car.edge.osmTags?.priority_road === "designated" ||
                 car.edge.osmTags?.junction === "roundabout" ? 1 : 0;
             groups.get(next.group).push({ car, next, intent, since: this.arrivals.get(key), priority,
-                eligible: ready && served && laneReady && this.exitSpace(car, next), dir: next.control.dir });
+                eligible: ready && served && laneReady && !this.crossings?.blocked.some(crossing=>crossing.id===next.control.nodeId) && this.exitSpace(car, next), dir: next.control.dir });
         }
         for (const key of this.arrivals.keys()) if (!seen.has(key)) this.arrivals.delete(key);
         for (const [group, requests] of groups) {
@@ -523,6 +523,7 @@ class LocalCityTraffic {
             car.far = distance > 5500 ? car.far + dt : 0;
             if (distance > 5500 && (car.far > 8 || car.age > 180)) this.cars.delete(id);
         }
+        this.crossings=game.cityCrossings;
         this.releaseReservations(); this.requests(now);
         for (const car of this.cars.values()) {
             let next = this.plan(car);
@@ -591,6 +592,10 @@ class LocalCityTraffic {
                     }
                 }
             } else if (car.arc) target = Math.min(target, Math.abs(car.arc.next.angle) > .35 ? 2.4 : car.cruise);
+            const pedestrianRoom = game.cityCrossings?.stopRoom(car.pose.x,car.pose.y,car.pose.dir[0],car.pose.dir[1],this.geometry.layer(car.edge)) ?? Infinity;
+            if(Number.isFinite(pedestrianRoom)){
+                target=Math.min(target,Math.sqrt(2*.2*pedestrianRoom));maxMove=Math.min(maxMove,pedestrianRoom);
+            }
             const oldSpeed = car.speed;
             car.speed += Math.max(-dt * 14, Math.min(dt * 5.5, target - car.speed));
             car.speed = Math.max(0, Math.min(car.speed, maxMove / (dt * 60)));

@@ -122,7 +122,9 @@ class CityMapGeometry {
             if (Math.abs(dir[0] * outward[1] - dir[1] * outward[0]) > .35) width = Math.max(width, other.lanes * this.laneWidth);
         }
         const tags = node?.osmTags || {}, type = tags.highway;
-        const applies = String(tags[`${type}:direction`] || tags.direction || "both").trim().toLowerCase();
+        const signalSource = type === "traffic_signals" || tags.crossing === "traffic_signals" && tags["crossing:signals"] !== "no" || tags["crossing:signals"] === "yes";
+        const feature = signalSource ? "traffic_signals" : type;
+        const applies = String(tags[`${feature}:direction`] || tags.direction || "both").trim().toLowerCase();
         let directional = applies === "both" || (applies === "backward" ? reverse : applies === "forward" ? !reverse : false);
         if (!["both","forward","backward"].includes(applies)) {
             const compass = { n:0,ne:45,e:90,se:135,s:180,sw:225,w:270,nw:315 };
@@ -147,19 +149,47 @@ class CityMapGeometry {
             }
         }
         if ((this.graph.adjacent.get(group.id) || []).length < 3) group = node;
-        const control = { nodeId, dir, width, stopLine: width / 2 + 34, groupIndex: group.index, signalDir,
-            signal: type === "traffic_signals" && directional,
+        if (signalSource && applies === "both" && (this.graph.adjacent.get(nodeId)||[]).length === 2) {
+            // Both directions of one bidirectional crossing must use the same
+            // signal group. Looking only forward chooses different junctions.
+            const candidates=[];
+            for(const first of this.graph.adjacent.get(nodeId)){
+                let current=nodeId,road=first,distance=0;const visited=new Set();
+                for(let step=0;step<96;step++){
+                    if(visited.has(road.id)||distance+road.length>600)break;
+                    visited.add(road.id);distance+=road.length;
+                    const reverse=road.to===current;current=this.graph.endpoint(road,reverse);
+                    const adjacent=this.graph.adjacent.get(current)||[];
+                    if(adjacent.length>=3){candidates.push({distance,node:this.graph.nodes.get(current),dir:this.graph.direction(road,reverse,reverse?0:road.length)});break;}
+                    if(adjacent.length!==2)break;
+                    const next=adjacent.find(item=>item.id!==road.id);if(!next)break;road=next;
+                }
+            }
+            candidates.sort((a,b)=>a.distance-b.distance||a.node.index-b.node.index);
+            if(candidates.length){group=candidates[0].node;signalDir=candidates[0].dir;}
+            else {group=node;signalDir=dir;}
+        }
+        const control = { nodeId, dir, width, stopLine: type === "crossing" ? 70 : width / 2 + 34, groupIndex: group.index, signalDir,
+            signal: signalSource && directional,
             stop: type === "stop" && directional, yield: type === "give_way" && directional };
         this.controls.set(key, control);
         if (this.controls.size > 2048) this.controls.delete(this.controls.keys().next().value);
         return control;
     }
-    signalState(control, session = null) {
+    signalPhase(control, session = null) {
         const frame = Math.floor((Date.now() + (session?.active ? session.clockOffset : 0)) / 1000 * 60);
         const direction = control.signalDir, index = control.groupIndex;
         const phase = mod(frame + Math.floor(hash(index, index * 7, session?.active ? session.state.seed : 0) * CYCLE) +
             (Math.abs(direction[1]) >= Math.abs(direction[0]) ? 0 : CYCLE / 2), CYCLE);
+        return phase;
+    }
+    signalState(control, session = null) {
+        const phase = this.signalPhase(control, session);
         return phase < GREEN_T ? "green" : phase < GREEN_T + YELLOW_T ? "yellow" : "red";
+    }
+    pedestrianGreen(control, session = null) {
+        const phase = this.signalPhase(control, session);
+        return phase >= GREEN_T + YELLOW_T && phase < GREEN_T + YELLOW_T + 75;
     }
 }
 

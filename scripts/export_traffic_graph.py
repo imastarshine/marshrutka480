@@ -55,7 +55,7 @@ def main():
         tags = node.get("osmTags", {})
         controls = {key: value for key, value in tags.items()
                     if key in ("highway", "direction", "traffic_signals:direction", "stop:direction", "give_way:direction",
-                               "stop", "give_way", "traffic_sign", "priority_road")}
+                               "stop", "give_way", "traffic_sign", "priority_road", "crossing", "crossing:signals", "crossing:markings", "foot")}
         nodes.append([node["x"], node["y"], tags.get("highway") == "traffic_signals", controls])
     edges = []
     for index, edge in enumerate(city["edges"]):
@@ -100,6 +100,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(gzip.compress(json.dumps(output, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), mtime=0))
     print(f"Traffic graph: {len(nodes)} nodes, {len(edges)} edges, {len(restrictions)} car turn rules, {args.output.stat().st_size} bytes gzip")
+    print(f"Source crossings: {sum(node[3].get('highway') == 'crossing' for node in nodes)}")
     print("Source controls: " + ", ".join(f"{kind}={sum(node[3].get('highway') == kind for node in nodes)}"
                                            for kind in ("traffic_signals", "stop", "give_way")))
 

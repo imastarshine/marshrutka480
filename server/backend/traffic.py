@@ -18,6 +18,8 @@ from pathlib import Path
 import random
 import time
 
+from .pedestrians import PedestrianWorld
+
 CELL = 4000.0
 SNAPSHOT_INNER, SNAPSHOT_OUTER = 3000.0, 3800.0
 SPAWN_GUARD, DELETE_GUARD = 2200.0, 5000.0
@@ -26,6 +28,7 @@ CAR_WIDTH, CAR_LENGTH = 50.0, 92.0
 STOP_LINE_GAP, BUMPER_GAP = 34.0, 6.0
 LOOKAHEAD = 1200.0
 SIGNAL_CYCLE, SIGNAL_GREEN, SIGNAL_HALF = 650, 290, 325
+SIGNAL_YELLOW = 25
 MAX_NPCS = 2048  # Simulation budget, independent from the player population.
 COLORS = ((200, 40, 40), (40, 90, 200), (30, 140, 60), (120, 120, 130),
           (230, 230, 230), (35, 35, 40), (150, 60, 160), (220, 120, 30))
@@ -286,7 +289,8 @@ class TrafficGraph:
                 cross_lanes = max(cross_lanes, other.base_lanes)
         width = LANE_WIDTH * cross_lanes if cross_lanes else 148.0
         tags = self.nodes[node][3] if len(self.nodes[node]) > 3 else {}
-        signal = tags.get("highway") == "traffic_signals" and _direction_applies(tags, "traffic_signals", reverse, dx, dy)
+        signal_source = tags.get("highway") == "traffic_signals" or (tags.get("crossing") == "traffic_signals" and tags.get("crossing:signals") != "no") or tags.get("crossing:signals") == "yes"
+        signal = signal_source and _direction_applies(tags, "traffic_signals", reverse, dx, dy)
         stop = tags.get("highway") == "stop" and _direction_applies(tags, "stop", reverse, dx, dy)
         give_way = tags.get("highway") == "give_way" and _direction_applies(tags, "give_way", reverse, dx, dy)
         main_road_sign = any(sign.strip() in ("RU:2.1", "2.1") for sign in edge.tags.get("traffic_sign", "").split(";"))
@@ -315,8 +319,39 @@ class TrafficGraph:
                     group = current
                     _, _, group_dx, group_dy = self.position(previous, 0 if following_reverse else following.length, following_reverse)
                     break
-        junction = Junction(node, controlled, width, width / 2 + STOP_LINE_GAP,
-                            width / 2 + STOP_LINE_GAP + CAR_LENGTH / 2 + BUMPER_GAP,
+        direction_tag = str(tags.get("traffic_signals:direction", tags.get("direction", "both"))).strip().lower()
+        if signal and direction_tag == "both" and len(self.incident.get(node, ())) == 2:
+            # Canonical physical group, independent of which side approaches
+            # this bidirectional crossing. Forward-only grouping disagrees.
+            candidates = []
+            for first in self.incident[node]:
+                current, road, distance, visited = node, first, 0.0, set()
+                for _ in range(96):
+                    candidate = self.edges[road]
+                    if road in visited or distance + candidate.length > 600:
+                        break
+                    visited.add(road)
+                    distance += candidate.length
+                    reverse_out = candidate.end == current
+                    current = self.end_node(road, reverse_out)
+                    adjacent = self.incident.get(current, ())
+                    if len(adjacent) >= 3:
+                        _, _, tx, ty = self.position(road, 0 if reverse_out else candidate.length, reverse_out)
+                        candidates.append((distance, current, tx, ty))
+                        break
+                    if len(adjacent) != 2:
+                        break
+                    following = [item for item in adjacent if item != road]
+                    if not following:
+                        break
+                    road = following[0]
+            if candidates:
+                _, group, group_dx, group_dy = min(candidates)
+            else:
+                group, group_dx, group_dy = node, dx, dy
+        stop_line = 70.0 if tags.get("highway") == "crossing" else width / 2 + STOP_LINE_GAP
+        junction = Junction(node, controlled, width, stop_line,
+                            stop_line + CAR_LENGTH / 2 + BUMPER_GAP,
                             abs(dy) >= abs(dx), signal, stop, give_way, priority,
                             group, abs(group_dy) >= abs(group_dx))
         self.junctions[key] = junction
@@ -328,9 +363,15 @@ class TrafficGraph:
         # Source signal nodes only. An ordinary OSM branch is not a traffic light.
         if not junction.signal:
             return False
-        phase = (world_frame + math.floor(_hash(junction.signal_group, junction.signal_group * 7, seed) * SIGNAL_CYCLE)
-                 + (0 if junction.signal_vertical else SIGNAL_HALF)) % SIGNAL_CYCLE
-        return phase >= SIGNAL_GREEN
+        return self.signal_phase(junction, seed, world_frame) >= SIGNAL_GREEN
+
+    def signal_phase(self, junction, seed, world_frame):
+        return (world_frame + math.floor(_hash(junction.signal_group, junction.signal_group * 7, seed) * SIGNAL_CYCLE)
+                + (0 if junction.signal_vertical else SIGNAL_HALF)) % SIGNAL_CYCLE
+
+    def pedestrian_green(self, junction, seed, world_frame):
+        phase = self.signal_phase(junction, seed, world_frame)
+        return SIGNAL_GREEN + SIGNAL_YELLOW <= phase < SIGNAL_GREEN + SIGNAL_YELLOW + 75
 
 
 @lru_cache(maxsize=1)
@@ -377,6 +418,7 @@ class SharedTraffic:
         self.seed = int(seed)
         self.random = random.Random(self.seed)
         self.max_npcs = max(0, int(max_npcs))
+        self.pedestrians = PedestrianWorld(self.graph, self.seed, _hash)
         self.npcs = {}
         self.elapsed = 0.0
         self._next_id = 0
@@ -762,6 +804,7 @@ class SharedTraffic:
             required_lane = self.graph.lanes(*request["incoming"]) - 1 if turn > 0 else 0
             lane_ready = turn == 0 or abs(npc.lateral - LANE_WIDTH * (required_lane + .5)) < 2
             request["ready"] = (request["room"] <= 160 and lane_ready
+                                and junction.node not in self.pedestrians.blocked_nodes
                                 and not self.graph.red(junction, self.seed, world_frame)
                                 and (not junction.stop or npc.stop_wait >= 1.0)
                                 and self._exit_clear(request, groups, obstacles))
@@ -1013,6 +1056,14 @@ class SharedTraffic:
         world_frame = math.floor(time.time() * 60)
         acceleration = 3.0 / self.graph.meters_per_unit
         braking = 7.0 / self.graph.meters_per_unit
+        vehicles = []
+        for npc in self.npcs.values():
+            px, py, _, _ = self._body(npc)
+            vehicles.append((px, py, npc.speed, CAR_WIDTH, CAR_LENGTH, self.graph.edges[npc.edge].layer))
+        for pose in self._poses:
+            px, py = self._observer_point(pose)
+            vehicles.append((px, py, abs(pose.get("speed", 0)) * 60, 70, 180, self.graph.edge_layers.get(pose.get("edge"))))
+        self.pedestrians.step(dt, self._poses, vehicles, world_frame)
         self._prepare_gates(dt, groups, obstacles, world_frame)
         for npc in self.npcs.values():
             body_before = self._body(npc)
@@ -1105,6 +1156,10 @@ class SharedTraffic:
                             gap = max(0, forward - 180)
                             target = min(target, math.sqrt(2 * braking * gap))
                             max_move = min(max_move, gap)
+            pedestrian_room = self.pedestrians.stop_room(x, y, dx, dy, edge.layer)
+            if math.isfinite(pedestrian_room):
+                target = min(target, math.sqrt(2 * braking * pedestrian_room))
+                max_move = min(max_move, pedestrian_room)
             previous_speed = npc.speed
             if target < npc.speed:
                 npc.speed = max(target, npc.speed - braking * dt)
