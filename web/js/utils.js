@@ -70,8 +70,8 @@ function approach(value, target, step) {
     return value + (target > value ? step : -step);
 }
 
-// Конечный граф Иркутска. Координаты схематические, связи — конкретные улицы:
-// название, ширина, остановки и миникарта используют одни и те же рёбра.
+// Общие узлы графа задают связи, geometry сохраняет все точки дороги между
+// перекрёстками. Длины, остановки, движение и миникарта используют эту ломаную.
 class CityGraph {
     constructor(data) {
         this.data = data;
@@ -81,9 +81,26 @@ class CityGraph {
         data.edges.forEach((source, index) => {
             const from = this.nodes.get(source.from), to = this.nodes.get(source.to);
             if (!from || !to) throw new Error(`Неизвестный узел улицы ${source.id}`);
-            const length = Math.hypot(to.x - from.x, to.y - from.y);
-            if (length < 1) throw new Error(`Нулевая длина улицы ${source.id}`);
-            const edge = { lanes: 4, ...source, index, length,
+            const geometry = source.geometry?.length >= 2
+                ? source.geometry.map((point) => Array.isArray(point) ? [...point] : [point.x, point.y])
+                : [[from.x, from.y], [to.x, to.y]];
+            if (geometry.some((point) => !Number.isFinite(point[0]) || !Number.isFinite(point[1]))) {
+                throw new Error(`Некорректная геометрия улицы ${source.id}`);
+            }
+            if (Math.hypot(geometry[0][0] - from.x, geometry[0][1] - from.y) > 0.01 ||
+                Math.hypot(geometry.at(-1)[0] - to.x, geometry.at(-1)[1] - to.y) > 0.01) {
+                throw new Error(`Геометрия не совпадает с узлами улицы ${source.id}`);
+            }
+            const distances = [0];
+            for (let point = 1; point < geometry.length; point++) {
+                distances.push(distances.at(-1) + Math.hypot(geometry[point][0] - geometry[point - 1][0],
+                    geometry[point][1] - geometry[point - 1][1]));
+            }
+            const length = distances.at(-1);
+            if (length < 0.001) throw new Error(`Нулевая длина улицы ${source.id}`);
+            const edge = { lanes: 4, ...source, index, length, geometry, distances,
+                bounds: { minX: Math.min(...geometry.map((point) => point[0])), maxX: Math.max(...geometry.map((point) => point[0])),
+                    minY: Math.min(...geometry.map((point) => point[1])), maxY: Math.max(...geometry.map((point) => point[1])) },
                 vector: [(to.x - from.x) / length, (to.y - from.y) / length] };
             this.edges.set(edge.id, edge);
             this.adjacent.get(edge.from).push(edge);
@@ -93,11 +110,55 @@ class CityGraph {
 
     endpoint(edge, reverse) { return reverse ? edge.from : edge.to; }
     origin(edge, reverse) { return reverse ? edge.to : edge.from; }
-    direction(edge, reverse) { return edge.vector.map((v) => reverse ? -v : v); }
+    segment(edge, offset) {
+        offset = clamp(offset, 0, edge.length);
+        let lo = 0, hi = edge.distances.length - 1;
+        while (lo + 1 < hi) {
+            const middle = (lo + hi) >> 1;
+            if (edge.distances[middle] <= offset) lo = middle;
+            else hi = middle;
+        }
+        while (lo > 0 && edge.distances[lo + 1] === edge.distances[lo]) lo--;
+        return lo;
+    }
+    direction(edge, reverse, offset = reverse ? edge.length : 0) {
+        const index = this.segment(edge, offset), a = edge.geometry[index], b = edge.geometry[index + 1];
+        const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        const sign = reverse ? -1 : 1;
+        return length ? [(b[0] - a[0]) / length * sign, (b[1] - a[1]) / length * sign] : [0, -sign];
+    }
     fromNode(edge, node) { return { edge, reverse: edge.to === node }; }
+    canTraverse(edge, reverse) {
+        const oneway = edge.oneway;
+        if (edge.busOneway !== undefined) return edge.busOneway === 0 || (edge.busOneway === -1) === reverse;
+        if (oneway === true || oneway === 1 || oneway === "yes" || oneway === "1") return !reverse;
+        if (oneway === -1 || oneway === "-1") return reverse;
+        return true;
+    }
+    canTurn(from, via, to, reverse) {
+        if ((from.from !== via && from.to !== via) || this.origin(to, reverse) !== via) return false;
+        if (!this.canTraverse(to, reverse)) return false;
+        const rules = (this.data.restrictions || []).filter((rule) => rule.from === from.id && rule.via === via);
+        if (rules.some((rule) => rule.only) && !rules.some((rule) => rule.only && rule.to === to.id)) return false;
+        return !rules.some((rule) => !rule.only && rule.to === to.id);
+    }
     position(edge, offset) {
-        const from = this.nodes.get(edge.from);
-        return [from.x + edge.vector[0] * offset, from.y + edge.vector[1] * offset];
+        offset = clamp(offset, 0, edge.length);
+        const index = this.segment(edge, offset), a = edge.geometry[index], b = edge.geometry[index + 1];
+        const length = edge.distances[index + 1] - edge.distances[index];
+        const t = length ? (offset - edge.distances[index]) / length : 0;
+        return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    }
+    project(edge, x, y) {
+        let best = { offset: 0, distance: Infinity, point: edge.geometry[0] };
+        for (let index = 1; index < edge.geometry.length; index++) {
+            const a = edge.geometry[index - 1], b = edge.geometry[index];
+            const dx = b[0] - a[0], dy = b[1] - a[1], length2 = dx * dx + dy * dy;
+            const t = length2 ? clamp(((x - a[0]) * dx + (y - a[1]) * dy) / length2, 0, 1) : 0;
+            const point = [a[0] + dx * t, a[1] + dy * t], distance = Math.hypot(x - point[0], y - point[1]);
+            if (distance < best.distance) best = { offset: edge.distances[index - 1] + Math.sqrt(length2) * t, distance, point };
+        }
+        return best;
     }
 
     itinerary(number) {
@@ -109,6 +170,7 @@ class CityGraph {
             const edge = this.edges.get(spec.edge);
             if (!edge) throw new Error(`Неизвестный участок маршрута ${number}: ${spec.edge}`);
             const reverse = spec.reverse ?? (previous !== null && edge.to === previous);
+            if (!this.canTraverse(edge, reverse)) throw new Error(`Маршрут ${number} против движения: ${edge.id}`);
             if (previous !== null && this.origin(edge, reverse) !== previous) {
                 throw new Error(`Разрыв маршрута ${number}: ${edge.id}`);
             }
@@ -120,24 +182,45 @@ class CityGraph {
             const edge = this.edges.get(spec.edge);
             if (!edge) throw new Error(`Неизвестный обратный участок маршрута ${number}: ${spec.edge}`);
             const reverse = spec.reverse ?? edge.to === previous;
+            if (!this.canTraverse(edge, reverse)) throw new Error(`Обратный маршрут ${number} против движения: ${edge.id}`);
             if (this.origin(edge, reverse) !== previous) throw new Error(`Разрыв обратного маршрута ${number}`);
             previous = this.endpoint(edge, reverse);
             return { edge, reverse };
         }) : [...outward].reverse().map((leg) => ({ edge: leg.edge, reverse: !leg.reverse }));
         let sequence = 0;
         const used = new Set();
-        const attach = (legs, stops, mirrored = false, stage = "out") => legs.map((leg) => {
+        const attach = (legs, stops, mirrored = false, stage = "out") => legs.map((leg, legIndex) => {
+            const pathIndex = mirrored ? outward.length - 1 - legIndex : legIndex;
             const list = stops.filter((stop, index) => !used.has(`${stage}:${index}`) &&
-                stop.edge === leg.edge.id && (mirrored ? !(stop.reverse ?? false) : (stop.reverse ?? false)) === leg.reverse)
-                .sort((a, b) => leg.reverse ? b.at - a.at : a.at - b.at)
+                (stop.pathIndex === undefined || stop.pathIndex === pathIndex) && stop.edge === leg.edge.id &&
+                (mirrored ? !(stop.reverse ?? false) : (stop.reverse ?? false)) === leg.reverse)
+                .sort((a, b) => {
+                    const aOffset = a.offset ?? a.at * leg.edge.length, bOffset = b.offset ?? b.at * leg.edge.length;
+                    return leg.reverse ? bOffset - aOffset : aOffset - bOffset;
+                })
                 .map((stop) => {
                     used.add(`${stage}:${stops.indexOf(stop)}`);
-                    return { ...stop, at: clamp(stop.at, 0.08, 0.92), sequence: sequence++ };
+                    const at = stop.offset !== undefined ? stop.offset / leg.edge.length : stop.at;
+                    if (!Number.isFinite(at) || at < 0 || at > 1) throw new Error(`Остановка вне дороги: ${stop.name}`);
+                    return { ...stop, at, sequence: sequence++ };
                 });
             return { ...leg, stops: list };
         });
         const legs = [...attach(outward, route.stops || []),
             ...attach(returning, route.returnStops || route.stops || [], !route.returnStops, "return")];
+        const expectedStops = (route.stops || []).length +
+            (route.loop ? 0 : (route.returnStops || route.stops || []).length);
+        if (sequence !== expectedStops) throw new Error(`Остановки не совпадают с путём маршрута ${number}`);
+        for (let index = 0; index < legs.length; index++) {
+            const leg = legs[index];
+            if (!this.canTraverse(leg.edge, leg.reverse)) throw new Error(`Маршрут ${number} против движения: ${leg.edge.id}`);
+            if (index) {
+                const previous = legs[index - 1], via = this.origin(leg.edge, leg.reverse);
+                if (!this.canTurn(previous.edge, via, leg.edge, leg.reverse)) {
+                    throw new Error(`Запрещённый поворот маршрута ${number}: ${previous.edge.id} → ${leg.edge.id}`);
+                }
+            }
+        }
         return { legs, stopCount: sequence };
     }
 }

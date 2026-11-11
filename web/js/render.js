@@ -266,8 +266,13 @@ class GameRender extends GameUpdate {
         ctx.restore();
     }
 
+    minimapRect() {
+        const size = window.citySession?.active ? 154 : 120;
+        return rect(6, HEIGHT - size - 26, size, size);
+    }
+
     drawMinimap() {
-        const size = window.citySession?.active ? 154 : 120, bx = 6, by = HEIGHT - size - 26;
+        const { x: bx, y: by, w: size } = this.minimapRect();
         fillRect(bx, by, size, size, [15, 20, 25], 0.82);
         const scale = 40 / BLOCK, cx = bx + size / 2, cy = by + size / 2;
         const toMap = (x, y) => [cx + (x - this.wx) * scale, cy + (y - this.wy) * scale];
@@ -277,10 +282,14 @@ class GameRender extends GameUpdate {
         ctx.rect(bx, by, size, size);
         ctx.clip();
         const routeEdges = new Set(this.cityItinerary.legs.map((leg) => leg.edge.id));
+        const radius = size / scale / 2 + 20;
         for (const edge of this.cityGraph.edges.values()) {
-            const from = this.cityGraph.nodes.get(edge.from), to = this.cityGraph.nodes.get(edge.to);
-            const [x, y] = toMap(from.x, from.y), [x2, y2] = toMap(to.x, to.y);
-            line(x, y, x2, y2, routeEdges.has(edge.id) ? [65, 130, 140] : [90, 95, 100], Math.max(2, edge.lanes / 2));
+            if (edge.bounds.minX > this.wx + radius || edge.bounds.maxX < this.wx - radius ||
+                edge.bounds.minY > this.wy + radius || edge.bounds.maxY < this.wy - radius) continue;
+            for (let index = 1; index < edge.geometry.length; index++) {
+                const [x, y] = toMap(...edge.geometry[index - 1]), [x2, y2] = toMap(...edge.geometry[index]);
+                line(x, y, x2, y2, routeEdges.has(edge.id) ? [65, 130, 140] : [90, 95, 100], Math.max(2, edge.lanes / 2));
+            }
         }
         const pts = [...this.trail, [this.wx, this.wy]].map(([x, y]) => toMap(x, y));
         ctx.strokeStyle = col([200, 160, 40]);
@@ -309,11 +318,75 @@ class GameRender extends GameUpdate {
         ctx.restore();
         strokeRect(bx, by, size, size, [200, 200, 200], 1);
         text("С", bx + size - 12, by + 3, RED, 11, { bold: true });
+        text("M · карта", bx + 6, by + 5, [180, 200, 210], 10);
         text(`${this.currentStreet()}, на ${this.compass()}`, bx, by + size + 5, WHITE, 11, { bold: true });
         const navigation = this.cityNavigation();
         const nw = Math.min(WIDTH - 12, textWidth(navigation, 12, true) + 18);
         panel(bx, by - 29, nw, 23, 0.84, this.cityOffRoute ? ORANGE : BLUE);
         text(navigation, bx + 8, by - 24, this.cityOffRoute ? ORANGE : WHITE, 12, { bold: true });
+    }
+
+    drawRouteOverview() {
+        const palette = [[226, 142, 104], [92, 206, 163], [122, 174, 255], [235, 135, 175], [200, 164, 245], [90, 210, 225]];
+        const routes = Object.entries(this.cityGraph.data.routes);
+        const area = rect(22, 116, WIDTH - 44, 414);
+        const points = [...this.cityGraph.nodes.values()];
+        const minX = Math.min(...points.map((point) => point.x)), maxX = Math.max(...points.map((point) => point.x));
+        const minY = Math.min(...points.map((point) => point.y)), maxY = Math.max(...points.map((point) => point.y));
+        const scale = Math.min((area.w - 30) / Math.max(1, maxX - minX), (area.h - 30) / Math.max(1, maxY - minY));
+        const toMap = (x, y) => [area.x + area.w / 2 + (x - (minX + maxX) / 2) * scale,
+            area.y + area.h / 2 + (y - (minY + maxY) / 2) * scale];
+        const drawEdge = (edge, color, width, alpha = 1) => {
+            for (let index = 1; index < edge.geometry.length; index++) {
+                const a = toMap(...edge.geometry[index - 1]), b = toMap(...edge.geometry[index]);
+                line(...a, ...b, color, width, alpha);
+            }
+        };
+        fillRect(0, 0, WIDTH, HEIGHT, [11, 20, 28], 0.99);
+        text("ИРКУТСК", 24, 27, [236, 242, 244], 27, { bold: true });
+        text("Маршруты города", 25, 63, [143, 167, 181], 14);
+        text("M / нажми, чтобы закрыть", WIDTH - 24, 34, [160, 182, 194], 12, { align: "right" });
+        const current = this.cityGraph.data.routes[this.route.num];
+        const title = `№ ${this.route.num}  ${current.title || current.termini?.join(" — ") || this.currentStreet()}`;
+        text(title, 25, 88, YELLOW, Math.min(15, (WIDTH - 50) / Math.max(1, textWidth(title, 15, true)) * 15), { bold: true });
+        fillRect(area.x, area.y, area.w, area.h, [18, 31, 42], 1, 10);
+        ctx.save();
+        ctx.beginPath(); ctx.rect(area.x, area.y, area.w, area.h); ctx.clip();
+        for (const edge of this.cityGraph.edges.values()) drawEdge(edge, [88, 112, 128], 1, 0.4);
+        const ordered = routes.map((entry, index) => ({ number: entry[0], route: entry[1], color: palette[index % palette.length] }))
+            .sort((a, b) => Number(a.number === this.route.num) - Number(b.number === this.route.num));
+        for (const item of ordered) {
+            const selected = item.number === this.route.num;
+            const edgeIds = new Set([...(item.route.path || []), ...(item.route.returnPath || [])]
+                .map((leg) => typeof leg === "string" ? leg : leg.edge));
+            for (const id of edgeIds) {
+                const edge = this.cityGraph.edges.get(id);
+                if (edge) drawEdge(edge, selected ? YELLOW : item.color, selected ? 3 : 1.5, selected ? 1 : 0.62);
+            }
+        }
+        const [px, py] = toMap(this.wx, this.wy), [dx, dy] = this.dir;
+        circle(px, py, 9, [5, 15, 22], 0.9);
+        poly([[px + dx * 8, py + dy * 8], [px - dx * 5 - dy * 5, py - dy * 5 + dx * 5],
+            [px - dx * 5 + dy * 5, py - dy * 5 - dx * 5]], YELLOW);
+        const labelX = clamp(px + 12, area.x + 8, area.x + area.w - 84), labelY = clamp(py - 22, area.y + 8, area.y + area.h - 22);
+        fillRect(labelX - 4, labelY - 3, 78, 20, [7, 18, 26], 0.94, 4);
+        text("Вы здесь", labelX, labelY, WHITE, 12, { bold: true });
+        ctx.restore();
+        const metersPerUnit = this.cityGraph.data.metersPerUnit || METERS_PER_PX;
+        const barMeters = [200, 500, 1000, 2000, 5000, 10000].find((meters) => meters / metersPerUnit * scale >= 60) || 10000;
+        const barWidth = barMeters / metersPerUnit * scale;
+        line(area.x + 14, area.y + area.h - 18, area.x + 14 + barWidth, area.y + area.h - 18, [197, 215, 225], 2);
+        text(barMeters >= 1000 ? `${barMeters / 1000} км` : `${barMeters} м`, area.x + 14, area.y + area.h - 36, [197, 215, 225], 10);
+        routes.forEach(([number, route], index) => {
+            const x = 24 + index % 2 * 305, y = 553 + Math.floor(index / 2) * 48;
+            const selected = number === this.route.num, color = selected ? YELLOW : palette[index % palette.length];
+            line(x, y + 9, x + 20, y + 9, color, selected ? 4 : 2);
+            text(`№ ${number}${selected ? " · ваш маршрут" : ""}`, x + 29, y, selected ? YELLOW : WHITE, 13, { bold: true });
+            const label = route.termini?.join(" — ") || route.title || "";
+            text(label, x + 29, y + 20, [145, 168, 182], Math.min(10, 260 / Math.max(1, textWidth(label, 10)) * 10));
+        });
+        text("Жёлтая линия — ваш маршрут · остальные линии — городские рейсы", 24, 711, [145, 168, 182], 11);
+        text("Рейс на паузе. M или нажатие — вернуться за руль", 24, 733, [204, 216, 225], 12);
     }
 
     drawHud() {

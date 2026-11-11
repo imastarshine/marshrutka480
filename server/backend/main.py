@@ -107,7 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok":True,"version":"2.1.1","protocol":1,"features":["original-city","world-poses","irkutsk-routes"]}
+        return {"ok":True,"version":"2.1.2","protocol":1,"features":["original-city","world-poses","irkutsk-routes"]}
 
     @app.post("/api/auth/register",status_code=201)
     async def register(body: Credentials, request: Request):

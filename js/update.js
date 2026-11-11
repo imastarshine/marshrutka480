@@ -231,7 +231,9 @@ class GameUpdate extends GameCore {
     updateStops() {
         for (const stop of this.stops) {
             const edge = this.cityGraph.edges.get(stop.cityEdge);
-            if (edge) {
+            if (stop.cityTravel !== undefined) {
+                stop.y = this.bus.centerY - (stop.cityTravel - this.cityTravel) - BusStop.HEIGHT / 2;
+            } else if (edge) {
                 const [x, y] = this.cityGraph.position(edge, stop.cityOffset);
                 const ahead = (x - this.wx) * this.dir[0] + (y - this.wy) * this.dir[1];
                 stop.y = this.bus.centerY - ahead - BusStop.HEIGHT / 2;
@@ -299,11 +301,13 @@ class GameUpdate extends GameCore {
         this.crosswalks = this.crosswalks.filter((c) => c.y > -800 && c.y < HEIGHT + 300);
         for (const inter of this.inters) {
             const node = this.cityGraph.nodes.get(inter.k);
-            if (node) {
+            if (inter.cityTravel !== undefined) {
+                inter.y = bus.centerY - (inter.cityTravel - this.cityTravel) - inter.h / 2;
+            } else if (node) {
                 const ahead = (node.x - this.wx) * this.dir[0] + (node.y - this.wy) * this.dir[1];
                 inter.y = bus.centerY - ahead - inter.h / 2;
             }
-            inter.update(node ? 0 : s, busClose(inter.zebraTop), bus);
+            inter.update(node || inter.cityTravel !== undefined ? 0 : s, busClose(inter.zebraTop), bus);
 
             this.checkPeds(inter.peds, inter.zebraTop);
             if (!inter.passed && bus.y < inter.stopLine && !bus.air) {
@@ -770,7 +774,8 @@ class GameUpdate extends GameCore {
         // тупик: дальше не проехать, только повернуть
         for (const inter of this.inters) {
             const room = bus.y - (inter.y + 6);
-            if (!this.cityTurnaround() && !inter.arms.straight && (inter.arms.left || inter.arms.right) && bus.speed > room && room > -200) {
+            if (!this.cityPendingTurn && !this.cityTurnaround() && !inter.arms.straight &&
+                (inter.arms.left || inter.arms.right) && bus.speed > room && room > -200) {
                 bus.speed = Math.max(0, room);
                 if (this.frame % 90 === 0) this.showBanner("Тупик! Поверни налево или направо", ORANGE, 80);
             }

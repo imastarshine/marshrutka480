@@ -165,6 +165,10 @@ class Game extends GameRender {
             if (drawIntro(this)) this.state = "menu";
             return;
         }
+        if (this.mapOverview && this.state !== "menu") {
+            this.drawRouteOverview();
+            return;
+        }
         if (this.state === "turning") this.drawTurning();
         else {
             ctx.save();
@@ -287,9 +291,22 @@ class Game extends GameRender {
 
     // --- ввод ---
     onKey(code, down) {
+        if (code === "KeyM") {
+            if (!down) { this.mapKeyHeld = false; return; }
+            if (this.mapKeyHeld) return;
+            this.mapKeyHeld = true;
+        }
         const map = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", KeyW: "up", KeyS: "down", KeyA: "left", KeyD: "right" };
         if (map[code]) this.keys[map[code]] = down;
         if (!down) return;
+        if (this.mapOverview) {
+            if (["KeyM", "Escape", "Enter", "Space"].includes(code)) this.toggleRouteMap();
+            return;
+        }
+        if (code === "KeyM" && ["play", "pause"].includes(this.state)) {
+            this.toggleRouteMap();
+            return;
+        }
         if (this.state === "intro") {
             this.state = "menu";
             return;
@@ -328,6 +345,11 @@ class Game extends GameRender {
     }
 
     onClick(x, y) {
+        if (this.mapOverview) { this.toggleRouteMap(); return; }
+        if (["play", "pause"].includes(this.state) && hit(rect(x, y, 1, 1), this.minimapRect())) {
+            this.toggleRouteMap();
+            return;
+        }
         if (this.state === "intro") {
             this.state = "menu";
             return;
@@ -363,7 +385,23 @@ class Game extends GameRender {
     }
 
     togglePause() {
+        if (this.mapOverview) { this.toggleRouteMap(); return; }
         if (this.state === "play") this.state = "pause";
         else if (this.state === "pause") this.state = "play";
+    }
+
+    toggleRouteMap() {
+        if (this.mapOverview) {
+            this.mapOverview = false;
+            if (this.mapPausedRun && this.state === "pause") this.state = "play";
+            this.mapPausedRun = false;
+        } else {
+            if (!["play", "pause"].includes(this.state)) return false;
+            this.mapPausedRun = this.state === "play";
+            if (this.mapPausedRun) this.state = "pause";
+            this.mapOverview = true;
+        }
+        Object.keys(this.keys).forEach((key) => { this.keys[key] = false; });
+        return true;
     }
 }
