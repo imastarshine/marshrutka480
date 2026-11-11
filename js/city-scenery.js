@@ -9,6 +9,7 @@ class CitySceneryWorld {
         this.seed = Number.isFinite(options.seed) ? options.seed >>> 0 : 1548718;
         this.sidewalk = Number.isFinite(options.sidewalkWidth) ? Math.max(0, options.sidewalkWidth) : 30;
         this.roadHalfWidth = options.roadHalfWidth;
+        this.isReserved = options.isReserved;
         this.cells = new Map();
         this.widths = new Map();
         this.maxCells = 300;
@@ -69,6 +70,7 @@ class CitySceneryWorld {
     }
 
     clearOfRoads(bounds, roads) {
+        if(this.isReserved?.(bounds))return false;
         for (const edge of roads) {
             const clearance = this.width(edge) + this.sidewalk + 18;
             if (!this.intersects(bounds, edge.bounds, clearance)) continue;

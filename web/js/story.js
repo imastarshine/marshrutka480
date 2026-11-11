@@ -136,7 +136,7 @@ const CITY_STORY = {
         progress: (g) => `${Math.max(0,Math.round(g.money))}/800 ₽`,
     },
 };
-const storyChapter = (g) => (g.unifiedWorld && CITY_STORY[g.save.story]) || STORY[g.save.story] || null;
+const storyChapter = (g) => (g.unifiedWorld && !(g.save.story===2&&g.cityEvents) && CITY_STORY[g.save.story]) || STORY[g.save.story] || null;
 
 // начало рейса: показать диалог главы (один раз), подготовить её условия
 function storyStart(g) {

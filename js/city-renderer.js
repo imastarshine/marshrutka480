@@ -1,9 +1,11 @@
 // One camera transform for the complete city: roads, stops and every vehicle.
 "use strict";
 class CityWorldRenderer {
-    constructor(graph, geometry) {
+    constructor(graph, geometry, events=null) {
         this.graph = graph; this.geometry = geometry;
-        this.scenery = new CitySceneryWorld(graph, { roadHalfWidth: (edge) => geometry.maxHalfWidth(edge) });
+        this.events=events;
+        this.scenery = new CitySceneryWorld(graph, { roadHalfWidth: (edge) => geometry.maxHalfWidth(edge),
+            isReserved: bounds=>Boolean(events?.reserved(bounds)) });
         this.stops = new Map();
         for (const [number, route] of Object.entries(graph.data.routes)) {
             for (const stop of [...(route.stops || []), ...(route.returnStops || [])]) {
@@ -30,6 +32,38 @@ class CityWorldRenderer {
         }
         ctx.strokeStyle = color; ctx.lineWidth = width;
         ctx.setLineDash(dash || []); ctx.lineDashOffset = offset; ctx.stroke(); ctx.setLineDash([]);
+    }
+    sidewalks(entries,bounds) {
+        const clip=new Path2D();
+        ctx.fillStyle=col(SIDEWALK);
+        for(const [,mesh] of entries){ctx.fill(mesh.sidewalk);clip.addPath(mesh.sidewalk);}
+        ctx.save();ctx.clip(clip);ctx.strokeStyle="rgba(116,121,111,.38)";ctx.lineWidth=1;
+        ctx.beginPath();
+        for(let x=Math.floor(bounds.minX/32)*32;x<=bounds.maxX;x+=32){ctx.moveTo(x,bounds.minY);ctx.lineTo(x,bounds.maxY);}
+        for(let y=Math.floor(bounds.minY/32)*32;y<=bounds.maxY;y+=32){ctx.moveTo(bounds.minX,y);ctx.lineTo(bounds.maxX,y);}
+        ctx.stroke();ctx.restore();
+        ctx.strokeStyle="#777e75";ctx.lineWidth=3;
+        for(const [,mesh] of entries)ctx.stroke(mesh.sidewalk);
+    }
+    lamps(edge,bounds) {
+        const tags=edge.osmTags||{};
+        if(tags.lit==="no"||tags.tunnel&&tags.tunnel!=="no"||!["primary","secondary","tertiary","unclassified","residential"].includes(tags.highway))return;
+        const address=sceneryRoadAddress({cityGraph:this.graph},edge),post=this.events?.byEdge.get(edge.id);
+        const from=(this.graph.adjacent.get(edge.from)?.length||0)>=3?this.geometry.junction(edge,true).width/2+60:0;
+        const end=edge.length-((this.graph.adjacent.get(edge.to)?.length||0)>=3?this.geometry.junction(edge,false).width/2+60:0);
+        for(let at=Math.ceil((address.prefix+from)/480)*480-address.prefix;at<end;at+=480){
+            if(post&&Math.abs(post.at-at)<350)continue;
+            const [x,y]=this.graph.position(edge,at),dir=this.geometry.direction(edge,at),width=this.geometry.halfWidth(edge,at);
+            if(x<bounds.minX-300||x>bounds.maxX+300||y<bounds.minY-300||y>bounds.maxY+300)continue;
+            ctx.save();ctx.translate(x,y);ctx.rotate(Math.atan2(dir[0],-dir[1]));
+            for(const side of [-1,1]){
+                const sx=side*(width+21);
+                circle(sx+4,5,6,[45,53,45],.28);circle(sx,0,5,[97,102,96]);
+                line(sx,0,sx-side*34,-5,[91,96,99],5);circle(sx-side*34,-5,6,[255,237,158]);
+                circle(sx-side*34,-5,15,[255,240,170],.1);
+            }
+            ctx.restore();
+        }
     }
     markings(edge, mesh) {
         const crossAt = (node) => (this.graph.adjacent.get(node) || []).length >= 3;
@@ -165,13 +199,14 @@ class CityWorldRenderer {
             }
         };
         for (const [layer,entries] of layers) {
-            ctx.fillStyle=col(SIDEWALK);
-            for (const [,mesh] of entries) ctx.fill(mesh.sidewalk);
+            this.sidewalks(entries,camera.bounds);
             ctx.fillStyle=col(ASPHALT);
             for (const [,mesh] of entries) ctx.fill(mesh.road);
             for (const [edge,mesh] of entries) this.markings(edge,mesh);
             game.cityCrossings.drawRoad(entries.map(([edge])=>edge),camera.bounds);
             for (const [edge] of entries) { this.stopPlatforms(game,edge); this.controls(game,edge); }
+            for(const [edge] of entries)this.lamps(edge,camera.bounds);
+            game.cityEvents?.draw(entries.map(([edge])=>edge),game.frame,camera.bounds);
             drawActors(layer);
         }
         ctx.restore();

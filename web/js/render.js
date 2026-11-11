@@ -5,7 +5,7 @@ class GameRender extends GameUpdate {
     // Geographic world rendering lives in CityWorldRenderer.
     drawWorld(withBus = true) {
         if (!this.cityRenderer || this.cityRenderer.graph !== this.cityGraph) {
-            this.cityRenderer = new CityWorldRenderer(this.cityGraph, this.cityMapGeometry);
+            this.cityRenderer = new CityWorldRenderer(this.cityGraph, this.cityMapGeometry, this.cityEvents);
         }
         this.cityRenderer.draw(this, withBus);
     }

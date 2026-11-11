@@ -296,6 +296,7 @@ class GameUpdate extends GameCore {
 
     updateWorldObjects() {
         if (this.unifiedWorld) {
+            this.cityEvents?.update(this);
             for (const inter of this.inters) {
                 if (inter.cityTravel !== undefined) inter.y = this.bus.centerY - (inter.cityTravel - this.cityTravel) - inter.h / 2;
                 if (inter.control?.signal) {
@@ -843,6 +844,7 @@ class GameUpdate extends GameCore {
         bus.x = roadMiddle() + best.lateral; bus.speed = 0; bus.vx = 0;
         bus.air = 0; bus.airTotal = 0; bus.landing = 0; bus.invuln = 360;
         bus.doorOpen = 0; this.boomTimer = 0; this.shake = 0; this.flash = 0;
+        this.cityEvents?.resetObserver();
         this.state = "play"; this.result = null; this.finishedCrashSave = null; this.lastCollision = null;
         this.particles = []; this.repPopup = null; this.keys = { up: false, down: false, left: false, right: false };
         if (window.citySession?.active) window.citySession.pendingSpawn = true;
