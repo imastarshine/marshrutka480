@@ -110,7 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok":True,"version":"2.2.0-beta.2","protocol":1,"features":["original-city","world-poses","irkutsk-routes","osm-road-geometry","public-city","guest-access","shared-traffic"]}
+        return {"ok":True,"version":"2.2.0-beta.3","protocol":1,"features":["original-city","world-poses","irkutsk-routes","osm-road-geometry","public-city","guest-access","shared-traffic"]}
 
     @app.post("/api/auth/guest", status_code=201)
     async def guest(body: EmptyBody, request: Request):

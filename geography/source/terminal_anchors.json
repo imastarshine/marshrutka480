@@ -1,0 +1,16 @@
+{
+  "checkedAt": "2026-11-11",
+  "verification": "The root agent visually checked the public 2GIS route map. Coordinates and node identity remain from the pinned OSM source; this file changes itinerary boundaries only.",
+  "anchors": [
+    {
+      "route": "83",
+      "name": "Радужный микрорайон",
+      "boundary": "outward-start-return-end",
+      "strategy": "nearest-stop-road-endpoint",
+      "expectedOsmNodeId": 293507464,
+      "source": "https://2gis.ru/irkutsk/route/1548718032689332",
+      "observedBy": "root",
+      "evidence": "The blue route passes along Obrucheva between the two Stasova carriageways. The terminal is at the northern endpoint of OSM way 1256904804, beside the sourced Raduzhny platform. A pre-stop A-to-B stub and a post-stop B-to-A connector created two spurious immediate reversals; neither belongs to the driven itinerary."
+    }
+  ]
+}

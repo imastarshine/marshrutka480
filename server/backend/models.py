@@ -78,6 +78,7 @@ class CityPoseMessage(StrictModel):
     route: Literal["480", "10", "80", "83", "33", "112", "90", "Т4"]
     state: Literal["intro", "menu", "dialog", "play", "turning", "pause", "boom", "offer", "caught", "station", "over"]
     street: str = Field(max_length=60)
+    edge: str = Field(default="", max_length=120)
 
 
 class PingMessage(StrictModel):

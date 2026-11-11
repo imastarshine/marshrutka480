@@ -410,26 +410,75 @@ function writeSave(data) {
     } catch (e) { /* приватный режим — просто не сохраняем */ }
 }
 
-// звук гудка: два «рычащих» тона; аудио создаётся при первом нажатии (так требуют браузеры)
+// Аудио разблокируется любым настоящим жестом, чтобы соседний водитель был
+// слышен и до первого собственного гудка. Сетевой пакет не создаёт контекст
+// и не ставит заблокированные гудки в очередь для позднего воспроизведения.
 let audioCtx = null;
-function hornSound() {
+let audioGestureSeen = false;
+let activeHornVoices = 0;
+function unlockGameAudio() {
     try {
-        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        if (!audioGestureSeen && !window.navigator?.userActivation?.isActive) return Promise.resolve(false);
+        const Audio = window.AudioContext || window.webkitAudioContext;
+        if (!Audio) return Promise.resolve(false);
+        if (!audioCtx || audioCtx.state === "closed") audioCtx = new Audio();
+        if (audioCtx.state === "running") return Promise.resolve(true);
+        return Promise.resolve(audioCtx.resume()).then(() => audioCtx.state === "running", () => false);
+    } catch (_) { return Promise.resolve(false); }
+}
+const unlockAudioGesture = (event) => {
+    if (!event.isTrusted) return;
+    audioGestureSeen = true;
+    void unlockGameAudio();
+};
+window.addEventListener?.("pointerdown", unlockAudioGesture, { capture: true, passive: true });
+window.addEventListener?.("keydown", unlockAudioGesture, { capture: true });
+
+// volume — доля локального гудка, pan — слева (-1) / справа (+1).
+function hornSound({ volume = 1, pan = 0, remote = false } = {}) {
+    volume = Number.isFinite(volume) ? clamp(volume, 0, 1) : 0;
+    pan = Number.isFinite(pan) ? clamp(pan, -1, 1) : 0;
+    if (volume < 0.002) return false;
+    const play = () => {
+        if (!audioCtx || audioCtx.state !== "running" || activeHornVoices >= 8) return false;
         const t = audioCtx.currentTime, gain = audioCtx.createGain();
-        gain.gain.setValueAtTime(0.0001, t);
-        gain.gain.exponentialRampToValueAtTime(0.18, t + 0.02);
-        gain.gain.setValueAtTime(0.18, t + 0.3);
-        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
-        gain.connect(audioCtx.destination);
+        const peak = 0.18 * volume / Math.sqrt(activeHornVoices + 1);
+        const floor = Math.min(0.0001, peak * 0.01);
+        gain.gain.setValueAtTime(floor, t);
+        gain.gain.exponentialRampToValueAtTime(peak, t + 0.02);
+        gain.gain.setValueAtTime(peak, t + 0.3);
+        gain.gain.exponentialRampToValueAtTime(floor, t + 0.42);
+        const panner = typeof audioCtx.createStereoPanner === "function" ? audioCtx.createStereoPanner() : null;
+        if (panner) {
+            panner.pan.setValueAtTime(pan, t);
+            gain.connect(panner); panner.connect(audioCtx.destination);
+        } else gain.connect(audioCtx.destination);
+        activeHornVoices++;
+        let remaining = 2;
         for (const f of [392, 494]) {
             const osc = audioCtx.createOscillator();
             osc.type = "sawtooth";
             osc.frequency.value = f;
             osc.connect(gain);
+            osc.onended = () => {
+                osc.disconnect();
+                if (--remaining === 0) {
+                    gain.disconnect(); panner?.disconnect();
+                    activeHornVoices = Math.max(0, activeHornVoices - 1);
+                }
+            };
             osc.start(t);
             osc.stop(t + 0.45);
         }
-    } catch (e) { /* без звука — не страшно */ }
+        return true;
+    };
+    try {
+        if (remote) return audioGestureSeen && audioCtx?.state === "running" ? play() : false;
+        const ready = unlockGameAudio();
+        if (audioCtx?.state === "running") return play();
+        void ready.then((unlocked) => { if (unlocked) play(); }).catch(() => {});
+        return true;
+    } catch (_) { return false; }
 }
 
 // минуты от полуночи -> "ЧЧ:ММ"

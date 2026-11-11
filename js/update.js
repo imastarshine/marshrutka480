@@ -786,14 +786,16 @@ class GameUpdate extends GameCore {
         bus.bay = this.bayExtra();
         bus.closed = approach(bus.closed, this.busClosed(), 0.75);
         bus.update(this.keys);
-        // тупик: дальше не проехать, только повернуть
+        // При нескольких боковых выездах ждём выбора улицы. Единственный
+        // разрешённый изгиб проходит автоматически, это не тупик.
         for (const inter of this.inters) {
             if (inter.k !== this.nextCross().k) continue;
             const room = bus.y - (inter.y + 6);
-            if (!this.cityPendingTurn && !this.cityTurnaround() && !inter.arms.straight &&
-                (inter.arms.left || inter.arms.right) && bus.speed > room && room > -200) {
+            const options = this.cityOptions(inter.k);
+            if (!this.cityPendingTurn && !this.selectedCityExit(options) && options.requiresChoice &&
+                bus.speed > room && room > -200) {
                 bus.speed = Math.max(0, room);
-                if (this.frame % 90 === 0) this.showBanner("Тупик! Поверни налево или направо", ORANGE, 80);
+                if (this.frame % 90 === 0) this.showBanner("Перекрёсток: выбери улицу Q/E или рулём", BLUE, 80);
             }
         }
         this.checkSlalom();

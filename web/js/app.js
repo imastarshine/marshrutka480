@@ -7,6 +7,7 @@ class MarshrutkaApp {
         this.mode="solo";this.panelView=null;this.panelOpen=false;this.pausedForPanel=false;
         this.reconnectTimer=null;this.reconnectDeadline=0;this.reconnectAttempt=0;
         this.connectionVersion=0;this.roomRequest=false;this.lastHorn=0;this.lastRoster="";
+        this.remoteHornAt=new Map();
         this.pendingCode=null;this.toastTimer=null;this.base="";
         this.publicWanted=false;this.publicJoining=false;this.cityCount=null;this.intent=0;
         this.restoreTask=null;this.sessionKey="m480.auth.session";this.spawnRetryAt=0;
@@ -256,6 +257,7 @@ class MarshrutkaApp {
     closeSocket(){
         clearTimeout(this.reconnectTimer);this.reconnectTimer=null;this.reconnectDeadline=0;this.reconnectAttempt=0;
         this.socketReady=false;this.connectionVersion++;this.spawnRetryAt=0;
+        this.remoteHornAt.clear();
         const ws=this.ws;this.ws=null;if(ws&&ws.readyState<2)ws.close(1000,"leave");
         this.banner("");
     }
@@ -282,11 +284,8 @@ class MarshrutkaApp {
                 if(msg.room?.mode!=="city")return;
                 this.room=msg.room;citySession.receive(msg);this.renderRoom();
             }else if(msg.type==="pong")this.latency=Math.max(0,Math.min(9999,Date.now()-msg.t));
-            else if(msg.type==="horn"&&msg.player_id!==this.user?.id){
-                citySession.horns.set(msg.player_id,performance.now()+650);
-                const p=citySession.players().find(p=>p.id===msg.player_id);
-                if(p&&Math.hypot(p.wx-game.wx,p.wy-game.wy)<1800&&!document.hidden)hornSound();
-            }else if(msg.type==="error")this.status("room-status",msg.detail||"Диспетчер отклонил запрос.",true);
+            else if(msg.type==="horn")this.receiveRemoteHorn(msg.player_id);
+            else if(msg.type==="error")this.status("room-status",msg.detail||"Диспетчер отклонил запрос.",true);
             else if(msg.type==="correction")this.status("room-status","Не удалось подтвердить позицию. Вернись в автопарк и начни новый рейс.",true);
         });
         ws.addEventListener("close",event=>{
@@ -342,6 +341,29 @@ class MarshrutkaApp {
     broadcastHorn(){
         if(Date.now()-this.lastHorn<2100)return;
         if(this.send({type:"horn"}))this.lastHorn=Date.now();
+    }
+    receiveRemoteHorn(playerId){
+        if(playerId===undefined||playerId===null||String(playerId)===String(citySession.playerId)||String(playerId)===String(this.user?.id))return;
+        const now=performance.now();
+        if(now-(this.remoteHornAt.get(playerId)??-Infinity)<150)return;
+        this.remoteHornAt.set(playerId,now);
+        for(const [id,time] of this.remoteHornAt)if(now-time>10000)this.remoteHornAt.delete(id);
+        citySession.horns.set(playerId,now+650);
+        this.playRemoteHorn(playerId);
+    }
+    playRemoteHorn(playerId){
+        if(!citySession.active||document.hidden||["intro","menu","over"].includes(game.state))return;
+        const player=citySession.players().find(p=>p.id===playerId);
+        if(!player||player.connected===false||!citySession.visible(player))return;
+        const listener=citySession.pose(game);
+        const [sourceX,sourceY]=citySession.worldPosition(player),[listenerX,listenerY]=citySession.worldPosition(listener);
+        const dx=sourceX-listenerX,dy=sourceY-listenerY,distance=Math.hypot(dx,dy);
+        const metersPerUnit=game.cityGraph?.data?.metersPerUnit||METERS_PER_PX;
+        const meters=distance*metersPerUnit;
+        if(!Number.isFinite(meters)||meters>=80)return;
+        const falloff=1-clamp((meters-4)/76,0,1),volume=.8*falloff*falloff;
+        const pan=distance>1?(dx*Math.cos(listener.angle)+dy*Math.sin(listener.angle))/distance:0;
+        hornSound({volume,pan,remote:true});
     }
     async leaveRoom(keepPublicIntent=false){
         if(!keepPublicIntent)this.publicWanted=false;

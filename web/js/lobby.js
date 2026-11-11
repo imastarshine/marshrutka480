@@ -354,7 +354,7 @@ class Game extends GameRender {
 
     onClick(x, y) {
         if (this.mapOverview) { this.toggleRouteMap(); return; }
-        if (this.state === "play" && hit(rect(x, y, 1, 1), this.exitSelectorRect())) {
+        if (this.state === "play" && hit(rect(x, y, 1, 1), this.exitSelectorRect()) && this.exitSelectorInfo().canCycle) {
             this.cycleCityExit(1);
             return;
         }

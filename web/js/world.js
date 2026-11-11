@@ -113,6 +113,7 @@ class Intersection {
         this.lanes = lanes;
         this.h = roadWidthFor(lanes);
         this.arms = arms;
+        this.kind = arms.deadEnd && arms.physicalEnd ? "deadend" : arms.requiresChoice ? "junction" : "road";
         this.t = randint(0, CYCLE);
         this.passed = false;        // маршрутка уже пересекла стоп-линию
         this.crossCars = [];        // {x, offset, dir, color}
@@ -180,8 +181,9 @@ class Intersection {
         const x0 = left ? L : ROAD_LEFT - 38, x1 = right ? R : ROAD_RIGHT + 40;
         fillRect(x0, y - 30, x1 - x0, h + 60, SIDEWALK);
         fillRect(left ? L : ROAD_LEFT, y, (right ? R : ROAD_RIGHT) - (left ? L : ROAD_LEFT), h, ASPHALT);
-        if (!straight) {
-            // тупик: дальше дома и газон, Т-образный перекрёсток
+        if (this.kind === "deadend" && !this.passed) {
+            // Только действительный конец дороги; боковой поворот или
+            // запрет движения прямо не добавляет выдуманный дом на улице.
             fillRect(ROAD_LEFT - 40, y - 900, ROAD_RIGHT - ROAD_LEFT + 80, 870, [92, 128, 78]);
             fillRect(ROAD_LEFT + 20, y - 230, ROAD_RIGHT - ROAD_LEFT - 40, 170, [150, 140, 130], 1, 4);
             strokeRect(ROAD_LEFT + 28, y - 222, ROAD_RIGHT - ROAD_LEFT - 56, 154, [120, 110, 100], 3, 3);
@@ -227,9 +229,9 @@ class Intersection {
         const w = textWidth(this.name, 14) + 8, sx = left ? 2 : ROAD_LEFT - 38 - w;
         fillRect(sx, y - 28, w, 20, [30, 90, 160], 1, 3);
         text(this.name, sx + 4, y - 18, WHITE, 14, { base: "middle" });
-        if (!straight) {
-            fillRect(roadMiddle() - 60, y - 60, 120, 24, [30, 90, 200], 1, 4);
-            text("ТУПИК: поворот", roadMiddle(), y - 48, WHITE, 13, { bold: true, align: "center", base: "middle" });
+        if (!this.passed && (this.kind === "deadend" || this.kind === "junction")) {
+            fillRect(roadMiddle() - 80, y - 60, 160, 24, [30, 90, 200], 1, 4);
+            text(this.kind === "deadend" ? "Конец дороги" : "Выберите улицу", roadMiddle(), y - 48, WHITE, 13, { bold: true, align: "center", base: "middle" });
         }
     }
 

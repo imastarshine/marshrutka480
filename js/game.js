@@ -217,6 +217,9 @@ class GameCore {
             straight: Boolean(options.straight),
             left: Boolean(options.left),
             right: Boolean(options.right),
+            deadEnd: options.deadEnd,
+            physicalEnd: options.physicalEnd,
+            requiresChoice: options.requiresChoice,
         };
     }
 
@@ -252,22 +255,20 @@ class GameCore {
         const nextLeg = this.cityItinerary.legs[(this.cityLegIndex + 1) % this.cityItinerary.legs.length];
         const guide = this.cityOffRoute && this.cityRejoinGuide?.key === this.cityExitKey() ? this.cityRejoinGuide : null;
         const preferred = guide?.edge || nextLeg.edge.id;
-        const exits = this.cityGraph.outgoingFrom(nodeId)
-            .filter((option) => option.edge.id !== this.cityEdge.id || option.edge.from === option.edge.to)
+        const exits = this.cityOrdinaryExits(this.cityEdge, this.cityReverse, nodeId)
             .sort((a, b) => Number(b.edge.id === preferred) - Number(a.edge.id === preferred));
+        const automatic = this.cityAutomaticExit(this.cityEdge, this.cityReverse, exits, nodeId);
         const incoming = this.cityGraph.direction(this.cityEdge, this.cityReverse,
             nodeId === this.cityEdge.to ? this.cityEdge.length : 0);
-        const physical = this.cityGraph.adjacent.get(nodeId) || [];
         for (const option of exits) {
             const edge = option.edge;
             if (!this.cityGraph.canTurn(this.cityEdge, nodeId, edge, option.reverse)) continue;
             const direction = this.cityGraph.direction(edge, option.reverse);
             const dot = incoming[0] * direction[0] + incoming[1] * direction[1];
             const cross = incoming[0] * direction[1] - incoming[1] * direction[0];
-            const continuation = (physical.length === 2 && !this.cityGraph.nodes.get(nodeId)?.junction) ||
-                (this.citySameRoad(edge, this.cityEdge) && dot > 0.15);
-            const side = dot > 0.64 || continuation
-                ? "straight" : cross < 0 ? "left" : "right";
+            const continuation = exits.length === 1;
+            const isAutomatic = automatic?.edge.id === edge.id && automatic.reverse === option.reverse;
+            const side = isAutomatic ? "straight" : cross < 0 ? "left" : "right";
             const choice = { ...option, direction, node: nodeId, side,
                 continuation, angle: Math.atan2(cross, dot) };
             choices.push(choice);
@@ -278,7 +279,35 @@ class GameCore {
             choices.push({ edge: this.cityEdge, reverse: !this.cityReverse, node: nodeId,
                 direction: incoming.map((value) => -value), side: "uturn", angle: Math.PI, continuation: false });
         }
+        Object.defineProperties(result, {
+            automatic: { value: result.straight },
+            deadEnd: { value: exits.length === 0 },
+            physicalEnd: { value: !(this.cityGraph.adjacent.get(nodeId) || []).some((edge) => edge.id !== this.cityEdge.id) },
+            requiresChoice: { value: exits.length > 0 && !result.straight },
+        });
         return result;
+    }
+
+    cityOrdinaryExits(edge, reverse, nodeId = this.cityGraph.endpoint(edge, reverse)) {
+        return this.cityGraph.outgoingFrom(nodeId).filter((option) =>
+            (option.edge.id !== edge.id || (edge.from === edge.to && option.reverse === reverse)) &&
+            this.cityGraph.canTurn(edge, nodeId, option.edge, option.reverse));
+    }
+
+    cityAutomaticExit(edge, reverse, exits = this.cityOrdinaryExits(edge, reverse), nodeId = this.cityGraph.endpoint(edge, reverse)) {
+        if (exits.length === 1) return exits[0];
+        if (!exits.length) return null;
+        const incoming = this.cityGraph.direction(edge, reverse, nodeId === edge.to ? edge.length : 0);
+        const aligned = exits.map((option) => {
+            const direction = this.cityGraph.direction(option.edge, option.reverse);
+            const angle = Math.abs(Math.atan2(incoming[0] * direction[1] - incoming[1] * direction[0],
+                incoming[0] * direction[0] + incoming[1] * direction[1]));
+            return { option, angle, sameRoad: this.citySameRoad(edge, option.edge) };
+        }).sort((a, b) => a.angle - b.angle || Number(b.sameRoad) - Number(a.sameRoad));
+        const first = aligned[0], second = aligned[1];
+        if (first.angle > Math.PI / 9) return null;
+        if (second && second.angle - first.angle < 0.12 && !(first.sameRoad && !second.sameRoad)) return null;
+        return first.option;
     }
 
     cityExitKey() { return `${this.cityEdge.id}:${this.cityReverse}:${this.nextCross().k}`; }
@@ -309,7 +338,8 @@ class GameCore {
     }
 
     exitSelectorRect() {
-        return rect(6, this.minimapRect().y - 62, WIDTH - 12, 28);
+        const map = this.minimapRect();
+        return rect(map.x + 4, map.y + map.h - 44, map.w - 8, 40);
     }
 
     cityRouteExit() {
@@ -364,11 +394,11 @@ class GameCore {
                     const pending = this.cityPendingTurn?.node === node
                         ? options.choices.find((candidate) => candidate.edge.id === this.cityPendingTurn.edge && candidate.reverse === this.cityPendingTurn.reverse)
                         : null;
-                    option = pending || selected || (!this.cityTurnaround() ? options.straight : null);
+                    option = pending || selected || options.automatic;
                 } else {
-                    const choices = graph.outgoingFrom(node).filter((candidate) =>
-                        this.cityCanContinue(leg.edge, leg.reverse, candidate));
-                    option = choices.find((candidate) => expected && candidate.edge.id === expected.edge.id && candidate.reverse === expected.reverse) || choices[0];
+                    // Exactly the same mandatory-bend / unambiguous-forward
+                    // policy used when the bus actually reaches this node.
+                    option = this.cityAutomaticExit(leg.edge, leg.reverse);
                 }
                 if (!option || !this.cityCanContinue(leg.edge, leg.reverse, option)) break;
                 segments.push({ edge: option.edge, reverse: option.reverse, start: leg.end, end: leg.end + option.edge.length });
@@ -429,7 +459,8 @@ class GameCore {
     cityTurnaround() {
         if (this.cityOffRoute) return false;
         const next = this.cityItinerary.legs[(this.cityLegIndex + 1) % this.cityItinerary.legs.length];
-        return next.edge.id === this.cityEdge.id && next.reverse !== this.cityReverse;
+        return next.edge.id === this.cityEdge.id && next.reverse !== this.cityReverse &&
+            this.cityOrdinaryExits(this.cityEdge, this.cityReverse).length === 0;
     }
 
     citySameRoad(first, second) {
@@ -439,13 +470,10 @@ class GameCore {
 
     cityCanContinue(edge, reverse, next) {
         const nodeId = this.cityGraph.endpoint(edge, reverse);
-        if (!next || next.edge.id === edge.id || this.cityGraph.origin(next.edge, next.reverse) !== nodeId ||
+        if (!next || this.cityGraph.origin(next.edge, next.reverse) !== nodeId ||
             !this.cityGraph.canTurn(edge, nodeId, next.edge, next.reverse)) return false;
-        if ((this.cityGraph.adjacent.get(nodeId) || []).length === 2 && !this.cityGraph.nodes.get(nodeId)?.junction) return true;
-        const incoming = this.cityGraph.direction(edge, reverse, reverse ? 0 : edge.length);
-        const outgoing = this.cityGraph.direction(next.edge, next.reverse);
-        const dot = incoming[0] * outgoing[0] + incoming[1] * outgoing[1];
-        return dot > 0.64 || (this.citySameRoad(edge, next.edge) && dot > 0.15);
+        const automatic = this.cityAutomaticExit(edge, reverse);
+        return automatic?.edge.id === next.edge.id && automatic.reverse === next.reverse;
     }
 
     cityContinue(option, nodeId) {
@@ -504,18 +532,17 @@ class GameCore {
                 this.startTurn(selected.angle < 0 ? -1 : 1, inter, selected);
                 break;
             }
-            if (options.straight && !this.cityTurnaround()) {
-                this.cityContinue(options.straight, nodeId);
+            if (options.automatic) {
+                this.cityContinue(options.automatic, nodeId);
                 continue;
             }
-            if ((this.cityTurnaround() || (!options.left && !options.right && !options.straight)) &&
-                this.cityGraph.canTraverse(this.cityEdge, !this.cityReverse)) {
+            const turnaround = options.choices.find((choice) => choice.side === "uturn");
+            if (options.deadEnd && turnaround) {
                 const terminal = this.inters.find((inter) => inter.k === nodeId) ||
                     new Intersection(this.bus.centerY - 100, nodeId, this.currentStreet(), 2,
                         { left: false, right: true, straight: false });
-                this.startTurn(1, terminal, { edge: this.cityEdge, reverse: !this.cityReverse,
-                    node: nodeId, direction: this.dir.map((value) => -value), angle: Math.PI });
-                this.showBanner("Конечная. Обратный рейс", YELLOW);
+                this.startTurn(1, terminal, turnaround);
+                this.showBanner("Конец разрешённого проезда. Разворот", YELLOW);
             } else {
                 this.bus.speed = 0;
                 if (!options.choices.length && this.frame % 90 === 0) {
@@ -934,11 +961,13 @@ class GameCore {
             this.spawnedLines.add(nx.k);
             const arms = this.arms(nx.k);
             const options = this.cityOptions(nx.k);
-            if (arms.left || arms.right || !arms.straight) {
+            const sourceSignal = this.cityGraph.nodes.get(nx.k)?.osmTags?.highway === "traffic_signals";
+            if (arms.left || arms.right || !arms.straight || sourceSignal) {
                 const cross = options.left || options.right;
                 const lanes = cross?.edge.lanes || 2, h = roadWidthFor(lanes);
                 const y = this.bus.centerY - (nx.a - this.along) - h / 2;
-                const inter = new Intersection(y, nx.k, cross?.edge.street || "Конечная", lanes, arms);
+                const name = cross?.edge.street || options.automatic?.edge.street || (options.deadEnd ? "Конец проезда" : "Перекрёсток");
+                const inter = new Intersection(y, nx.k, name, lanes, arms);
                 inter.cityTravel = this.cityTravel + (nx.a - this.along);
                 inter.closed = this.closedLanesAt(y + h / 2);
                 this.inters.push(inter);

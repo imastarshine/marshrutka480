@@ -2,6 +2,7 @@
 
 python scripts/import_irkutsk_osm.py
 python scripts/import_irkutsk_osm.py --prepare-source path/to/overpass.json [...]
+python scripts/import_irkutsk_osm.py --refresh-route-cache
 
 The importer never merges nearby coordinates: graph connectivity uses original
 OSM node IDs only. All original shape vertices survive in edge.geometry. Transit
@@ -26,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "geography/source/irkutsk-osm-2026-11-11.json.gz"
 ROUTE_CACHE = ROOT / "geography/source/verified-route-corridors.json.gz"
+TERMINAL_ANCHORS = ROOT / "geography/source/terminal_anchors.json"
 METERS_PER_UNIT = 7 / 3.6 / 60
 LAT0, LON0, RADIUS = 52.28, 104.28, 6371008.8
 ROUTES = {
@@ -102,6 +104,7 @@ class RoadGraph:
             for name in group:
                 self.aliases[normalize_name(name)] = canonical
         self.stop_overrides = json.loads((ROOT / "geography/source/2gis_stop_platforms.json").read_text(encoding="utf-8"))["platforms"]
+        self.terminal_anchors = json.loads(TERMINAL_ANCHORS.read_text(encoding="utf-8"))["anchors"]
         self.raw = {(e["type"], e["id"]): e for e in source["elements"]}
         self.raw_nodes = {e["id"]: e for e in source["elements"] if e["type"] == "node"}
         self.relations = {e["id"]: e for e in source["elements"] if e["type"] == "relation" and e.get("tags", {}).get("type") == "route"}
@@ -455,6 +458,65 @@ class RoadGraph:
             route[path_key] = new_path
         return route
 
+    def anchor_route_terminal(self, number, route, rule):
+        """Trim only verified pre/post-stop stubs, at a real shared road node.
+
+        A platform projected onto the end of the first road used to force that
+        entire road into the path before boarding. Closing the return path back
+        to that road's origin then added a second, unnecessary reversal. The
+        itinerary boundary belongs to the terminal platform's nearest endpoint.
+        This is opt-in evidence, not a blanket removal of legitimate turnbacks.
+        """
+        if rule["boundary"] != "outward-start-return-end" or rule["strategy"] != "nearest-stop-road-endpoint":
+            raise ValueError(f"Route {number}: unsupported terminal anchor rule")
+        first, last = route["stops"][0], route["returnStops"][-1]
+        if any(normalize_name(stop["name"]) != normalize_name(rule["name"]) for stop in (first, last)):
+            raise ValueError(f"Route {number}: verified terminal names changed")
+
+        def nearest_endpoint(stop):
+            edge = self.edges[stop["edge"]]
+            point = project_geo(stop["lat"], stop["lon"])
+            return min((edge["_from"], edge["_to"]),
+                       key=lambda node: math.dist(point, (self.nodes[node]["x"], self.nodes[node]["y"])))
+
+        anchor = nearest_endpoint(first)
+        if anchor != nearest_endpoint(last) or anchor != rule["expectedOsmNodeId"]:
+            raise ValueError(f"Route {number}: terminal no longer resolves to the verified source endpoint")
+        for stop in (first, last):
+            edge = self.edges[stop["edge"]]
+            endpoint_offset = 0 if edge["_from"] == anchor else edge["_length"]
+            if abs(stop["at"] * edge["_length"] - endpoint_offset) * METERS_PER_UNIT > 0.01:
+                raise ValueError(f"Route {number}: terminal platform projection is no longer at a road endpoint")
+
+        path, return_path = route["path"], route["returnPath"]
+        first_index, last_index = first["pathIndex"], last["pathIndex"]
+        first_leg, last_leg = path[first_index], return_path[last_index]
+        begin = first_index if self.origin(first_leg) == anchor else first_index + 1
+        end = last_index + 1 if self.end(last_leg) == anchor else last_index
+        if not 0 <= begin < len(path) or not 0 < end <= len(return_path):
+            raise ValueError(f"Route {number}: terminal anchor would remove a complete direction")
+        if self.origin(path[begin]) != anchor or self.end(return_path[end - 1]) != anchor:
+            raise ValueError(f"Route {number}: no original road connection at the verified terminal")
+        if any(stop["pathIndex"] < begin for stop in route["stops"][1:]) or any(
+                stop["pathIndex"] >= end for stop in route["returnStops"][:-1]):
+            raise ValueError(f"Route {number}: terminal trimming would discard a passenger stop")
+        removed_prefix, removed_suffix = path[:begin], return_path[end:]
+        route["path"], route["returnPath"] = path[begin:], return_path[:end]
+        for stop in route["stops"][1:]:
+            stop["pathIndex"] -= begin
+
+        def attach(stop, leg, index):
+            edge = self.edges[leg["edge"]]
+            at = 0.0 if edge["_from"] == anchor else 1.0
+            point = project_geo(stop["lat"], stop["lon"])
+            stop.update(edge=leg["edge"], reverse=leg["reverse"], pathIndex=index, at=at,
+                        distanceToRoadMeters=round(math.dist(point, (self.nodes[anchor]["x"], self.nodes[anchor]["y"])) * METERS_PER_UNIT, 3))
+
+        attach(first, route["path"][0], 0)
+        attach(last, route["returnPath"][-1], len(route["returnPath"]) - 1)
+        return {"route": number, "name": rule["name"], "osmNodeId": anchor, "source": rule["source"],
+                "strategy": rule["strategy"], "removedPreStopLegs": removed_prefix, "removedPostStopLegs": removed_suffix}
+
     def export(self, cache=None):
         routes, audit = {}, {"relations": [], "terminalConnectors": []}
         if cache:
@@ -486,18 +548,31 @@ class RoadGraph:
                 audit["terminalConnectors"].append({"route": number, "end": "outward", "edges": outward_connector})
                 audit["terminalConnectors"].append({"route": number, "end": "return", "edges": return_connector})
             routes[number] = route
-        if cache:
-            for info in audit["relations"]:
-                for number, ids in ROUTES.items():
-                    if info["relationId"] not in ids:
-                        continue
-                    route = routes[number]
-                    path = route["path"] if ids.index(info["relationId"]) == 0 else route["returnPath"]
-                    stops = route["stops"] if ids.index(info["relationId"]) == 0 else route["returnStops"]
-                    info["pathEdges"] = len(path)
-                    info["roadLengthMeters"] = round(sum(self.edges[leg["edge"]]["_length"] for leg in path) * METERS_PER_UNIT, 3)
-                    info["stops"] = stops
-                    info["maxStopDistanceMeters"] = max(stop["distanceToRoadMeters"] for stop in stops)
+        for rule in self.terminal_anchors:
+            number = rule["route"]
+            adjustment = self.anchor_route_terminal(number, routes[number], rule)
+            records = audit.setdefault("terminalAnchors", [])
+            previous = next((record for record in records if record["route"] == number and record["name"] == rule["name"]), None)
+            if adjustment["removedPreStopLegs"] or adjustment["removedPostStopLegs"] or previous is None:
+                if previous:
+                    records.remove(previous)
+                records.append(adjustment)
+            # Terminal connectors are the roads strictly after the final stop.
+            # A trimmed pre-stop stub must not survive here as a claimed detour.
+            for record in audit["terminalConnectors"]:
+                if record["route"] == number and record["end"] == "return":
+                    record["edges"] = routes[number]["returnPath"][routes[number]["returnStops"][-1]["pathIndex"] + 1:]
+        for info in audit["relations"]:
+            for number, ids in ROUTES.items():
+                if info["relationId"] not in ids:
+                    continue
+                route = routes[number]
+                path = route["path"] if ids.index(info["relationId"]) == 0 else route["returnPath"]
+                stops = route["stops"] if ids.index(info["relationId"]) == 0 else route["returnStops"]
+                info["pathEdges"] = len(path)
+                info["roadLengthMeters"] = round(sum(self.edges[leg["edge"]]["_length"] for leg in path) * METERS_PER_UNIT, 3)
+                info["stops"] = stops
+                info["maxStopDistanceMeters"] = max(stop["distanceToRoadMeters"] for stop in stops)
         edges = [{key: value for key, value in edge.items() if not key.startswith("_")} for edge in self.edges.values()]
         restrictions = []
         for node, rules in self.turn_rules.items():
@@ -549,6 +624,7 @@ class RoadGraph:
                              "incompleteBoundaryRestrictions": self.source.get("incompleteBoundaryRestrictions", []),
                              "roadMarkings": "Original OSM tags retained verbatim where present. Lane display and traffic remain arcade mechanics; missing markings are unknown, not inferred.",
                              "stopOrderSource": "geography/source/authoritative_stop_order.json",
+                             "terminalAnchorSource": str(TERMINAL_ANCHORS.relative_to(ROOT)).replace("\\", "/"),
                              "routeReconstruction": "Ordered OSM platforms, connected source roads; relation-member ways preferred. Added ways are audited separately."}}
         audit["counts"] = {"nodes": len(data["nodes"]), "edges": len(edges), "routes": len(routes),
                            "stops": sum(len(route["stops"]) + len(route.get("returnStops", [])) for route in routes.values()),
@@ -561,6 +637,7 @@ def main():
     parser.add_argument("--source", type=Path, default=SOURCE)
     parser.add_argument("--prepare-source", nargs="+", type=Path)
     parser.add_argument("--rebuild-routes", action="store_true", help="Reconstruct routes from source platforms instead of re-splitting the pinned verified road corridors")
+    parser.add_argument("--refresh-route-cache", action="store_true", help="Pin the normalized existing corridors without recomputing routes from platforms")
     parser.add_argument("--output", type=Path, default=ROOT / "js/city.js")
     parser.add_argument("--mirror", type=Path, default=ROOT / "web/js/city.js")
     parser.add_argument("--report", type=Path, default=ROOT / "test-results/geography/import-report.json")
@@ -583,12 +660,16 @@ def main():
         for field, filename in (("evidenceSha256", "authoritative_stop_order.json"), ("gpsSha256", "2gis_stop_platforms.json")):
             if cache[field] != hashlib.sha256((ROOT / "geography/source" / filename).read_bytes()).hexdigest():
                 raise ValueError(f"Stop evidence {filename} changed; rebuild verified corridors explicitly")
+        terminal_hash = cache.get("terminalAnchorsSha256")
+        if terminal_hash and terminal_hash != hashlib.sha256(TERMINAL_ANCHORS.read_bytes().replace(b"\r\n", b"\n")).hexdigest() and not args.refresh_route_cache:
+            raise ValueError("Terminal anchor evidence changed; explicitly refresh the verified route cache")
     data, audit = RoadGraph(source).export(cache)
-    if args.rebuild_routes or not ROUTE_CACHE.exists():
+    if args.rebuild_routes or args.refresh_route_cache or not ROUTE_CACHE.exists():
         used = {leg["edge"] for route in data["routes"].values() for leg in route["path"] + route.get("returnPath", [])}
         verified = {"description": "Verified source OSM way/node paths, re-split when additional original city-road junctions are imported.",
                     "evidenceSha256": hashlib.sha256((ROOT / "geography/source/authoritative_stop_order.json").read_bytes()).hexdigest(),
                     "gpsSha256": hashlib.sha256((ROOT / "geography/source/2gis_stop_platforms.json").read_bytes()).hexdigest(),
+                    "terminalAnchorsSha256": hashlib.sha256(TERMINAL_ANCHORS.read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
                     "routes": data["routes"], "edges": [{key: edge[key] for key in ("id", "osmWayIds", "osmNodeIds")} for edge in data["edges"] if edge["id"] in used],
                     "audit": audit}
         ROUTE_CACHE.write_bytes(gzip.compress(json.dumps(verified, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), mtime=0))
